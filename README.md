@@ -42,6 +42,8 @@ configuration is declarative and does not require Rust knowledge:
 - `window_manager.floating_classes` lists window classes that should float.
 - `applications.startup` lists commands started when HWMS launches.
 - `applications.commands` adds custom keybindings for commands.
+- Set `terminal = true` for terminal applications such as `btop`; HyperDE will
+	open them inside `window_manager.terminal_command`.
 
 For example, this starts a notes app and adds a browser shortcut:
 
@@ -49,7 +51,7 @@ For example, this starts a notes app and adds a browser shortcut:
 [applications]
 startup = ["kcalc"]
 commands = [
-	{ name = "Browser", key = "M-b", command = "firefox" },
+	{ name = "System monitor", key = "M-t", command = "btop", terminal = true },
 ]
 ```
 

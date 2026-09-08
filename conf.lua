@@ -18,8 +18,9 @@ return {
 	applications = {
 		startup = {},
 		commands = {
-			{ name = "Browser", key = "M-b", command = "firefox" },
-			{ name = "File manager", key = "M-e", command = "thunar" },
+			{ name = "Browser", key = "M-b", command = "firefox", terminal = false },
+			{ name = "File manager", key = "M-e", command = "thunar", terminal = false },
+			{ name = "System monitor", key = "M-t", command = "btop", terminal = true },
 		},
 	},
 }

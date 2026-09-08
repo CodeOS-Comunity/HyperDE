@@ -67,7 +67,8 @@ fn key_bindings(configuration: &HyperdeConfig) -> Result<KeyBindings<RustConn>, 
     }
     for application in &configuration.applications.commands {
         if !application.key.trim().is_empty() && !application.command.trim().is_empty() {
-            bindings.insert(application.key.clone(), spawn_command(application.command.clone()));
+            let command = application_command(configuration, application);
+            bindings.insert(application.key.clone(), spawn_command(command));
         }
     }
 
@@ -81,6 +82,14 @@ fn key_bindings(configuration: &HyperdeConfig) -> Result<KeyBindings<RustConn>, 
     }
 
     Ok(parse_keybindings_with_xmodmap(bindings)?)
+}
+
+fn application_command(configuration: &HyperdeConfig, application: &crate::config::ApplicationCommand) -> String {
+    if application.terminal {
+        format!("{} -e {}", configuration.window_manager.terminal_command, application.command)
+    } else {
+        application.command.clone()
+    }
 }
 
 fn spawn_command(command: String) -> Box<dyn KeyEventHandler<RustConn>> {

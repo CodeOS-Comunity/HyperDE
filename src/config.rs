@@ -44,6 +44,8 @@ pub struct ApplicationCommand {
 	pub name: String,
 	pub key: String,
 	pub command: String,
+	#[serde(default)]
+	pub terminal: bool,
 }
 
 impl Default for HyperdeConfig {
@@ -193,6 +195,7 @@ fn load_lua(contents: &str) -> Result<HyperdeConfig, Box<dyn Error>> {
 					name: command.get("name")?,
 					key: command.get("key")?,
 					command: command.get("command")?,
+					terminal: command.get::<_, Option<bool>>("terminal")?.unwrap_or(false),
 				})
 			})
 			.collect::<Result<Vec<_>, mlua::Error>>()?;
