@@ -1,7 +1,7 @@
 use std::{collections::HashMap, error::Error};
 
 use penrose::{
-    core::{bindings::{KeyBindings, MouseBindings}, Config, WindowManager},
+    core::{bindings::{KeyBindings, MouseBindings}, WindowManager},
     x11rb::RustConn,
 };
 

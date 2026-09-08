@@ -1,7 +1,17 @@
--- Kept as a human-readable desktop profile for tools that already discover
--- HyperDE through the old configuration filename. Runtime configuration lives
--- in Rust so the project has no Lua or platform-specific runtime dependency.
 return {
-	compositor = "chroma",
-	window_manager = "hwms",
+	config_file = "hyperde.toml",
+	compositor = {
+		name = "chroma",
+		panel_height = 28,
+		launcher_command = "hyperde-launcher",
+	},
+	window_manager = {
+		name = "hwms",
+		workspaces = { "1", "2", "3", "4", "5", "6", "7", "8", "9" },
+		normal_border = "#3c3836ff",
+		focused_border = "#cc241dff",
+		border_width = 2,
+		focus_follow_mouse = true,
+		floating_classes = { "dmenu", "dunst" },
+	},
 }
