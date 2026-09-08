@@ -2,7 +2,6 @@
 
 [compositor]
 panel_height = 28
-launcher_command = "hyperde-launcher"
 
 [window_manager]
 workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]

@@ -3,7 +3,6 @@ return {
 	compositor = {
 		name = "chroma",
 		panel_height = 28,
-		launcher_command = "hyperde-launcher",
 	},
 	window_manager = {
 		name = "hwms",

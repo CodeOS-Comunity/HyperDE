@@ -25,8 +25,23 @@ The resulting executable accepts one component name:
 ./target/release/hyperde hwms
 ```
 
+## Configuration
+
+Edit `hyperde.toml` in the working directory, or point `HYPERDE_CONFIG` at a
+different file. The configuration is declarative and does not require Lua or
+Rust knowledge:
+
+- `compositor.panel_height` controls the Chroma panel geometry.
+- `window_manager.workspaces` sets workspace names.
+- `window_manager.normal_border` and `focused_border` use RGBA hex colors.
+- `window_manager.border_width` sets Penrose border width in pixels.
+- `window_manager.focus_follow_mouse` controls pointer focus behavior.
+- `window_manager.floating_classes` lists window classes that should float.
+
+`conf.lua` remains as a readable profile for users coming from Lua-based
+desktop configuration, while `hyperde.toml` is the file currently loaded by
+the Rust runtime.
+
 Start Chroma before HWMS in an X11 session. Only one compositor can own each
-screen, so an existing compositor must be stopped first. The current HWMS
-configuration intentionally starts with Penrose defaults and empty bindings;
-key and mouse bindings can be added in `src/backend/hwms/mod.rs` without
-changing Chroma.
+screen, so an existing compositor must be stopped first. Key and mouse
+bindings can be added in `src/backend/hwms/mod.rs` without changing Chroma.

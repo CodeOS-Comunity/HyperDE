@@ -1,5 +1,6 @@
 use std::{env, error::Error, fs, path::PathBuf};
 
+use crate::ui::panels::PANEL_HEIGHT;
 use penrose::{core::Config, x11rb::RustConn, Color};
 use serde::Deserialize;
 
@@ -14,7 +15,6 @@ pub struct HyperdeConfig {
 #[serde(default)]
 pub struct CompositorConfig {
 	pub panel_height: u16,
-	pub launcher_command: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,7 +39,7 @@ impl Default for HyperdeConfig {
 
 impl Default for CompositorConfig {
 	fn default() -> Self {
-		Self { panel_height: 28, launcher_command: String::from("hyperde-launcher") }
+		Self { panel_height: PANEL_HEIGHT }
 	}
 }
 
