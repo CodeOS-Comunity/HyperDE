@@ -24,6 +24,7 @@ use penrose::util;
 use crate::config::HyperdeConfig;
 
 pub fn run(configuration: &HyperdeConfig) -> Result<(), Box<dyn Error>> {
+    configuration.validate_applications()?;
     for command in &configuration.applications.startup {
         if !command.trim().is_empty() {
             util::spawn(command)?;

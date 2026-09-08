@@ -78,6 +78,29 @@ impl Default for WindowManagerConfig {
 }
 
 impl HyperdeConfig {
+	pub fn validate_applications(&self) -> Result<(), Box<dyn Error>> {
+		let mut names = HashSet::new();
+		let mut keys = HashSet::new();
+		for application in &self.applications.commands {
+			if application.name.trim().is_empty() {
+				return Err("applications.commands entries need a name".into());
+			}
+			if application.key.trim().is_empty() {
+				return Err(format!("application '{}' needs a key", application.name).into());
+			}
+			if application.command.trim().is_empty() {
+				return Err(format!("application '{}' needs a command", application.name).into());
+			}
+			if !names.insert(application.name.as_str()) {
+				return Err(format!("duplicate application name: {}", application.name).into());
+			}
+			if !keys.insert(application.key.as_str()) {
+				return Err(format!("duplicate application key: {}", application.key).into());
+			}
+		}
+		Ok(())
+	}
+
 	pub fn penrose_config(&self) -> Result<Config<RustConn>, Box<dyn Error>> {
 		if self.window_manager.workspaces.is_empty() {
 			return Err("window_manager.workspaces cannot be empty".into());
