@@ -33,6 +33,8 @@ Rust knowledge:
 
 - `compositor.panel_height` controls the Chroma panel geometry.
 - `window_manager.workspaces` sets workspace names.
+- `window_manager.terminal_command` is launched by `Mod+Enter`.
+- `window_manager.launcher_command` is launched by `Mod+d` when non-empty.
 - `window_manager.normal_border` and `focused_border` use RGBA hex colors.
 - `window_manager.border_width` sets Penrose border width in pixels.
 - `window_manager.focus_follow_mouse` controls pointer focus behavior.
@@ -43,5 +45,8 @@ desktop configuration, while `hyperde.toml` is the file currently loaded by
 the Rust runtime.
 
 Start Chroma before HWMS in an X11 session. Only one compositor can own each
-screen, so an existing compositor must be stopped first. Key and mouse
-bindings can be added in `src/backend/hwms/mod.rs` without changing Chroma.
+screen, so an existing compositor must be stopped first. HWMS uses `Mod` as
+the modifier: `Mod+j/k` changes focus, `Mod+1..9` selects workspaces,
+`Mod+Shift+1..9` moves windows, `Mod+Space` changes layout, `Mod+Shift+q`
+closes a window, and `Mod+q` exits HWMS. `Mod+Shift` plus left or right mouse
+buttons moves or resizes the focused window.

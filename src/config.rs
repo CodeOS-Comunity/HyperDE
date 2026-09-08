@@ -1,4 +1,4 @@
-use std::{env, error::Error, fs, path::PathBuf};
+use std::{collections::HashSet, env, error::Error, fs, path::PathBuf};
 
 use crate::ui::panels::PANEL_HEIGHT;
 use penrose::{core::Config, x11rb::RustConn, Color};
@@ -21,6 +21,8 @@ pub struct CompositorConfig {
 #[serde(default)]
 pub struct WindowManagerConfig {
 	pub workspaces: Vec<String>,
+	pub terminal_command: String,
+	pub launcher_command: String,
 	pub normal_border: String,
 	pub focused_border: String,
 	pub border_width: u32,
@@ -47,6 +49,8 @@ impl Default for WindowManagerConfig {
 	fn default() -> Self {
 		Self {
 			workspaces: (1..=9).map(|number| number.to_string()).collect(),
+			terminal_command: String::from("xterm"),
+			launcher_command: String::new(),
 			normal_border: String::from("#3c3836ff"),
 			focused_border: String::from("#cc241dff"),
 			border_width: 2,
@@ -58,6 +62,19 @@ impl Default for WindowManagerConfig {
 
 impl HyperdeConfig {
 	pub fn penrose_config(&self) -> Result<Config<RustConn>, Box<dyn Error>> {
+		if self.window_manager.workspaces.is_empty() {
+			return Err("window_manager.workspaces cannot be empty".into());
+		}
+		let unique_workspaces: HashSet<&str> = self
+			.window_manager
+			.workspaces
+			.iter()
+			.map(String::as_str)
+			.collect();
+		if unique_workspaces.len() != self.window_manager.workspaces.len() {
+			return Err("window_manager.workspaces must not contain duplicates".into());
+		}
+
 		let mut config = Config::default();
 		config.tags = self.window_manager.workspaces.clone();
 		config.normal_border = Color::try_from(self.window_manager.normal_border.as_str())?;

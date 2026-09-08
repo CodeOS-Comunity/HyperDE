@@ -7,6 +7,8 @@ return {
 	window_manager = {
 		name = "hwms",
 		workspaces = { "1", "2", "3", "4", "5", "6", "7", "8", "9" },
+		terminal_command = "xterm",
+		launcher_command = "",
 		normal_border = "#3c3836ff",
 		focused_border = "#cc241dff",
 		border_width = 2,
