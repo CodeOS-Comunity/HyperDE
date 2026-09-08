@@ -15,4 +15,11 @@ return {
 		focus_follow_mouse = true,
 		floating_classes = { "dmenu", "dunst" },
 	},
+	applications = {
+		startup = {},
+		commands = {
+			{ name = "Browser", key = "M-b", command = "firefox" },
+			{ name = "File manager", key = "M-e", command = "thunar" },
+		},
+	},
 }

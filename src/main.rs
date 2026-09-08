@@ -5,7 +5,7 @@ mod ui;
 use std::{env, error::Error, process::ExitCode};
 
 fn print_usage() {
-	eprintln!("usage: hyperde <chroma|hwms>\n\nSet HYPERDE_CONFIG to use a different TOML file.");
+	eprintln!("usage: hyperde <chroma|hwms>\n\nUses hyperde.toml, or conf.lua when TOML is absent. Set HYPERDE_CONFIG to choose a file.");
 }
 
 fn main() -> ExitCode {

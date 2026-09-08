@@ -24,6 +24,11 @@ use penrose::util;
 use crate::config::HyperdeConfig;
 
 pub fn run(configuration: &HyperdeConfig) -> Result<(), Box<dyn Error>> {
+    for command in &configuration.applications.startup {
+        if !command.trim().is_empty() {
+            util::spawn(command)?;
+        }
+    }
     let connection = RustConn::new()?;
     let key_bindings = key_bindings(configuration)?;
     let mouse_bindings = mouse_bindings();
@@ -58,6 +63,11 @@ fn key_bindings(configuration: &HyperdeConfig) -> Result<KeyBindings<RustConn>, 
             String::from("M-d"),
             spawn_command(configuration.window_manager.launcher_command.clone()),
         );
+    }
+    for application in &configuration.applications.commands {
+        if !application.key.trim().is_empty() && !application.command.trim().is_empty() {
+            bindings.insert(application.key.clone(), spawn_command(application.command.clone()));
+        }
     }
 
     for (index, tag) in configuration.window_manager.workspaces.iter().enumerate() {

@@ -12,3 +12,13 @@ focused_border = "#cc241dff"
 border_width = 2
 focus_follow_mouse = true
 floating_classes = ["dmenu", "dunst"]
+
+[applications]
+# Commands started when HWMS launches. Leave empty to disable startup apps.
+startup = []
+
+# Add a keybinding for any command. Use Penrose syntax, for example "M-c".
+commands = [
+	{ name = "Browser", key = "M-b", command = "firefox" },
+	{ name = "File manager", key = "M-e", command = "thunar" },
+]

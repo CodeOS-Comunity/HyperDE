@@ -27,9 +27,10 @@ The resulting executable accepts one component name:
 
 ## Configuration
 
-Edit `hyperde.toml` in the working directory, or point `HYPERDE_CONFIG` at a
-different file. The configuration is declarative and does not require Lua or
-Rust knowledge:
+Edit `hyperde.toml` in the working directory, or use `conf.lua` for Lua-based
+configuration. HyperDE loads `hyperde.toml` first and falls back to `conf.lua`
+when TOML is absent. You can also point `HYPERDE_CONFIG` at either file. The
+configuration is declarative and does not require Rust knowledge:
 
 - `compositor.panel_height` controls the Chroma panel geometry.
 - `window_manager.workspaces` sets workspace names.
@@ -39,10 +40,24 @@ Rust knowledge:
 - `window_manager.border_width` sets Penrose border width in pixels.
 - `window_manager.focus_follow_mouse` controls pointer focus behavior.
 - `window_manager.floating_classes` lists window classes that should float.
+- `applications.startup` lists commands started when HWMS launches.
+- `applications.commands` adds custom keybindings for commands.
 
-`conf.lua` remains as a readable profile for users coming from Lua-based
-desktop configuration, while `hyperde.toml` is the file currently loaded by
-the Rust runtime.
+For example, this starts a notes app and adds a browser shortcut:
+
+```toml
+[applications]
+startup = ["kcalc"]
+commands = [
+	{ name = "Browser", key = "M-b", command = "firefox" },
+]
+```
+
+Commands are launched directly, without a shell. Use an executable and its
+space-separated arguments, such as `firefox --private-window`.
+
+Lua files return one configuration table. They are evaluated without shell
+access, and only the documented configuration values are read.
 
 Start Chroma before HWMS in an X11 session. Only one compositor can own each
 screen, so an existing compositor must be stopped first. HWMS uses `Mod` as
