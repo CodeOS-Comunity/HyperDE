@@ -1,0 +1,10 @@
+[package]
+name = "hyperde"
+version = "0.1.0"
+edition = "2021"
+description = "A portable X11 desktop environment: Chroma compositor and HWMS window manager."
+license = "MIT"
+
+[dependencies]
+penrose = "=0.3.6"
+x11rb = { version = "0.13", features = ["composite", "damage", "render", "xfixes"] }
