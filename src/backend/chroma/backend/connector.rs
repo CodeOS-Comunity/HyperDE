@@ -48,7 +48,7 @@ impl ChromaConnection {
 			return Err("another X11 compositor already owns the screen".into());
 		}
 
-		connection.composite_redirect_subwindows(screen.root, composite::Redirect::Manual)?;
+		connection.composite_redirect_subwindows(screen.root, composite::Redirect::MANUAL)?;
 		connection.flush()?;
 
 		Ok(Self { connection, screen_number, overlay, compositor_atom })

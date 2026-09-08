@@ -7,4 +7,6 @@ license = "MIT"
 
 [dependencies]
 penrose = "=0.3.6"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 x11rb = { version = "0.13", features = ["composite", "damage", "render", "xfixes"] }
