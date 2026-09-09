@@ -4,7 +4,10 @@ use x11rb::{
 	connection::Connection,
 	protocol::{
 		composite::{self, ConnectionExt as CompositeConnectionExt},
-		xproto::{Atom, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, Window, WindowClass},
+		xproto::{
+			Atom, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, SelectionClearEvent,
+			Window, WindowClass,
+		},
 	},
 	rust_connection::RustConnection,
 	CURRENT_TIME,
@@ -24,6 +27,10 @@ impl ChromaConnection {
 			.intern_atom(false, format!("_NET_WM_CM_S{screen_number}").as_bytes())?
 			.reply()?
 			.atom;
+		let existing_owner = connection.get_selection_owner(compositor_atom)?.reply()?.owner;
+		if existing_owner != 0 {
+			return Err(format!("another X11 compositor already owns screen {screen_number}").into());
+		}
 
 		let overlay = connection.generate_id()?;
 		connection.create_window(
@@ -58,8 +65,16 @@ impl ChromaConnection {
 		let _ = (self.screen_number, self.overlay, self.compositor_atom);
 		loop {
 			let event = self.connection.wait_for_event()?;
-			if let x11rb::protocol::Event::ClientMessage(ClientMessageEvent { .. }) = event {
-				// Client messages are consumed here so visual policy stays in Chroma.
+			match event {
+				x11rb::protocol::Event::ClientMessage(ClientMessageEvent { .. }) => {
+					// Client messages are consumed here so visual policy stays in Chroma.
+				}
+				x11rb::protocol::Event::SelectionClear(SelectionClearEvent { selection, .. })
+					if selection == self.compositor_atom =>
+				{
+					return Err("Chroma lost the X11 compositor selection".into());
+				}
+				_ => {}
 			}
 		}
 	}

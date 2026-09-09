@@ -10,6 +10,12 @@ fn print_usage() {
 
 fn main() -> ExitCode {
 	let mut arguments = env::args().skip(1);
+	let component = arguments.next();
+	if matches!(component.as_deref(), Some("help" | "--help" | "-h")) {
+		print_usage();
+		return ExitCode::SUCCESS;
+	}
+
 	let configuration = match config::load() {
 		Ok(configuration) => configuration,
 		Err(error) => {
@@ -17,13 +23,9 @@ fn main() -> ExitCode {
 			return ExitCode::FAILURE;
 		}
 	};
-	let result = match arguments.next().as_deref() {
+	let result = match component.as_deref() {
 		Some("chroma") => backend::chroma::run(&configuration),
 		Some("hwms") => backend::hwms::run(&configuration),
-		Some("help" | "--help" | "-h") => {
-			print_usage();
-			Ok(())
-		}
 		_ => {
 			print_usage();
 			Err::<(), Box<dyn Error>>("a component must be selected".into())

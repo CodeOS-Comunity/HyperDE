@@ -80,9 +80,62 @@ impl Default for WindowManagerConfig {
 }
 
 impl HyperdeConfig {
+	pub fn validate(&self) -> Result<(), Box<dyn Error>> {
+		if self.compositor.panel_height == 0 {
+			return Err("compositor.panel_height must be greater than zero".into());
+		}
+		if self.window_manager.border_width > 64 {
+			return Err("window_manager.border_width must be 64 or less".into());
+		}
+		self.validate_workspaces()?;
+		self.validate_applications()?;
+		Color::try_from(self.window_manager.normal_border.as_str())?;
+		Color::try_from(self.window_manager.focused_border.as_str())?;
+		if self
+			.applications
+			.commands
+			.iter()
+			.any(|application| application.terminal)
+			&& self.window_manager.terminal_command.trim().is_empty()
+		{
+			return Err("terminal applications require window_manager.terminal_command".into());
+		}
+		Ok(())
+	}
+
+	fn validate_workspaces(&self) -> Result<(), Box<dyn Error>> {
+		if self.window_manager.workspaces.is_empty() {
+			return Err("window_manager.workspaces cannot be empty".into());
+		}
+		if self.window_manager.workspaces.iter().any(|workspace| workspace.trim().is_empty()) {
+			return Err("window_manager.workspaces cannot contain empty names".into());
+		}
+		let unique_workspaces: HashSet<&str> = self
+			.window_manager
+			.workspaces
+			.iter()
+			.map(String::as_str)
+			.collect();
+		if unique_workspaces.len() != self.window_manager.workspaces.len() {
+			return Err("window_manager.workspaces must not contain duplicates".into());
+		}
+		Ok(())
+	}
+
 	pub fn validate_applications(&self) -> Result<(), Box<dyn Error>> {
 		let mut names = HashSet::new();
 		let mut keys = HashSet::new();
+		let mut reserved_keys: HashSet<String> = [
+			"M-j", "M-k", "M-S-j", "M-S-k", "M-S-q", "M-q", "M-space", "M-S-space",
+			"M-S-Up", "M-S-Down", "M-S-Right", "M-S-Left", "M-Return", "M-d",
+		]
+		.into_iter()
+		.map(String::from)
+		.collect();
+		for index in 1..=self.window_manager.workspaces.len() {
+			reserved_keys.insert(format!("M-{index}"));
+			reserved_keys.insert(format!("M-S-{index}"));
+		}
 		for application in &self.applications.commands {
 			if application.name.trim().is_empty() {
 				return Err("applications.commands entries need a name".into());
@@ -92,6 +145,9 @@ impl HyperdeConfig {
 			}
 			if application.command.trim().is_empty() {
 				return Err(format!("application '{}' needs a command", application.name).into());
+			}
+			if reserved_keys.contains(application.key.trim()) {
+				return Err(format!("application '{}' uses a reserved key: {}", application.name, application.key).into());
 			}
 			if !names.insert(application.name.as_str()) {
 				return Err(format!("duplicate application name: {}", application.name).into());
@@ -104,19 +160,6 @@ impl HyperdeConfig {
 	}
 
 	pub fn penrose_config(&self) -> Result<Config<RustConn>, Box<dyn Error>> {
-		if self.window_manager.workspaces.is_empty() {
-			return Err("window_manager.workspaces cannot be empty".into());
-		}
-		let unique_workspaces: HashSet<&str> = self
-			.window_manager
-			.workspaces
-			.iter()
-			.map(String::as_str)
-			.collect();
-		if unique_workspaces.len() != self.window_manager.workspaces.len() {
-			return Err("window_manager.workspaces must not contain duplicates".into());
-		}
-
 		let mut config = Config::default();
 		config.tags = self.window_manager.workspaces.clone();
 		config.normal_border = Color::try_from(self.window_manager.normal_border.as_str())?;
@@ -143,14 +186,18 @@ pub fn load() -> Result<HyperdeConfig, Box<dyn Error>> {
 		})
 		.unwrap_or_else(|| PathBuf::from("hyperde.toml"));
 	if !path.exists() {
-		return Ok(HyperdeConfig::default());
+		let configuration = HyperdeConfig::default();
+		configuration.validate()?;
+		return Ok(configuration);
 	}
 
 	let contents = fs::read_to_string(&path)?;
 	if path.extension().and_then(|extension| extension.to_str()) == Some("lua") {
 		return Ok(load_lua(&contents)?);
 	}
-	Ok(toml::from_str(&contents)?)
+	let configuration: HyperdeConfig = toml::from_str(&contents)?;
+	configuration.validate()?;
+	Ok(configuration)
 }
 
 fn load_lua(contents: &str) -> Result<HyperdeConfig, Box<dyn Error>> {
@@ -202,7 +249,53 @@ fn load_lua(contents: &str) -> Result<HyperdeConfig, Box<dyn Error>> {
 		}
 	}
 
+	config.validate()?;
 	Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn defaults_are_valid() {
+		assert!(HyperdeConfig::default().validate().is_ok());
+	}
+
+	#[test]
+	fn rejects_duplicate_application_keys() {
+		let mut config = HyperdeConfig::default();
+		config.applications.commands = vec![
+			ApplicationCommand { name: "one".into(), key: "M-a".into(), command: "one".into(), terminal: false },
+			ApplicationCommand { name: "two".into(), key: "M-a".into(), command: "two".into(), terminal: false },
+		];
+		assert!(config.validate().is_err());
+	}
+
+	#[test]
+	fn rejects_workspace_binding_collision() {
+		let mut config = HyperdeConfig::default();
+		config.applications.commands = vec![ApplicationCommand {
+			name: "Collision".into(),
+			key: "M-1".into(),
+			command: "xterm".into(),
+			terminal: false,
+		}];
+		assert!(config.validate().is_err());
+	}
+
+	#[test]
+	fn parses_lua_application_commands() {
+		let config = load_lua(r#"
+			return {
+				applications = { commands = {
+					{ name = "Monitor", key = "M-t", command = "btop", terminal = true },
+				} }
+			}
+		"#).expect("Lua config should parse");
+		assert_eq!(config.applications.commands[0].command, "btop");
+		assert!(config.applications.commands[0].terminal);
+	}
 }
 
 fn optional_table<'lua>(root: &Table<'lua>, name: &str) -> Result<Option<Table<'lua>>, mlua::Error> {
