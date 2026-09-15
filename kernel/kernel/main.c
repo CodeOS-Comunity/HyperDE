@@ -695,6 +695,9 @@ void kernel_main(uint32_t magic __attribute__((unused)),
         /* Wire the X11 compositor into the desktop render path. */
         extern void xs_init(void);
         xs_init();
+        /* Arm the user-window bridge (Android apps -> LVGL windows). */
+        extern void user_wm_init(void);
+        user_wm_init();
     }
     if (has_fb && qt_desktop_init()) {
         bootsplash_set_progress(100, "Ready!");

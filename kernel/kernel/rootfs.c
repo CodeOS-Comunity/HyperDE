@@ -259,10 +259,10 @@ int rootfs_extract_debian_minimal(void) {
     int is_dir;
 
     /* Already extracted? */
-    if (fs_resolve(base, &is_dir) == 0 && is_dir) {
+    if (fs_resolve(base, &is_dir) >= 0 && is_dir) {
         char shpath[FS_PATH_MAX];
         snprintf(shpath, sizeof(shpath), "%s/bin/sh", base);
-        if (fs_resolve(shpath, &is_dir) == 0) {
+        if (fs_resolve(shpath, &is_dir) >= 0) {
             kprintf("[rootfs] debian-minimal already extracted\n");
             return 0;
         }
@@ -507,7 +507,7 @@ int rootfs_seed_android_stock(void) {
     };
 
     for (int i = 0; targets[i]; i++) {
-        if (fs_resolve(targets[i], &is_dir) == 0) {
+        if (fs_resolve(targets[i], &is_dir) >= 0) {
             kprintf("[rootfs] android-stock: %s already present\n", targets[i]);
             continue;
         }

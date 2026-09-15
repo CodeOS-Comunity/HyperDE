@@ -32,6 +32,16 @@ kernel/userspace/linux-runner
 kernel/userspace/ld-codeos
 kernel/userspace/terminal
 kernel/userspace/syscall_test
+kernel/userspace/android-launcher
+kernel/userspace/android-clock
+kernel/userspace/android-calculator
+kernel/userspace/android-settings
+kernel/userspace/android-dialer
+kernel/userspace/android-music
+kernel/userspace/android-browser
+kernel/userspace/android-camera
+kernel/userspace/android-calendar
+kernel/userspace/android-keyboard
 codeos-1-kernel.bin
 codeos-1-kernel.iso
 

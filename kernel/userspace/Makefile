@@ -22,7 +22,10 @@ USER_LDFLAGS = -nostdlib -z max-page-size=0x1000 -z noexecstack
 PROGRAMS = init shell csl zircon-notify zircon-clock zircon-info \
            apk-parser android-container android-apps code-music \
            linux-runner ld-codeos terminal syscall_test openweb \
-           wineserver wine-runner linux-probe run-as dnslookup
+           wineserver wine-runner linux-probe run-as dnslookup \
+           android-launcher android-clock android-calculator \
+           android-settings android-dialer android-music android-browser \
+           android-camera android-calendar android-keyboard
 
 all: $(PROGRAMS)
 
@@ -41,18 +44,24 @@ lib/stdlib.o: lib/stdlib.c include/unistd.h
 lib/android.o: lib/android.c include/android.h include/unistd.h include/string.h
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
+lib/android_ui.o: lib/android_ui.c include/android_ui.h include/wm_protocol.h include/unistd.h include/string.h include/stdio.h
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
 lib/errno.o: lib/errno.c include/unistd.h include/errno.h include/string.h
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
 LIB_OBJ = lib/string.o lib/stdio.o lib/stdlib.o lib/errno.o
-LIB_ANDROID = lib/android.o
+LIB_ANDROID = lib/android.o lib/android_ui.o
 
 # Programs that only need core libs
 CORE_PROGS = init shell csl zircon-notify zircon-clock zircon-info \
              code-music linux-runner syscall_test crosvm-launcher android-apps \
              wineserver wine-runner run-as dnslookup
 # Programs that also need android lib
-ANDROID_PROGS = apk-parser android-container
+ANDROID_PROGS = apk-parser android-container android-launcher \
+                android-clock android-calculator android-settings \
+                android-dialer android-music android-browser \
+                android-camera android-calendar android-keyboard
 
 define core-prog-rule
 $(1): $(PKG_SRC)/$(1)/src/$(1).c crt0.o $$(LIB_OBJ)

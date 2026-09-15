@@ -12,6 +12,7 @@
 #include "umode.h"
 #include "rootfs.h"
 #include "shell.h"
+#include "user_wm.h"
 #include "../drivers/timer.h"
 #include "../arch/x86_64/fb.h"
 
@@ -489,6 +490,12 @@ int container_list_all(char out[][CONTAINER_NAME_MAX], int max) {
     return count;
 }
 
+/* Android apps live under /system/app/<name>/<name> in the container image;
+ * when exec'd they get the user-window bridge (fds 3/4 -> desktop windows). */
+static int is_android_app_path(const char *path) {
+    return path && strncmp(path, "/system/app/", 12) == 0;
+}
+
 /* ─── Execute inside a running container ─── */
 int container_exec(int id, const char *path, int argc, char **argv, char **envp) {
     int saved_ns[PROC_NS_MAX];
@@ -561,6 +568,10 @@ int container_exec(int id, const char *path, int argc, char **argv, char **envp)
         ns_add_proc(c->ns_pid, cur->pid);
     }
 
+    /* Android apps draw through the user-window bridge (fds 3/4). */
+    if (cur && is_android_app_path(path))
+        user_wm_setup(cur->pid);
+
     extern uint64_t syscall_kernel_rsp;
     uint64_t outer_scrsp = syscall_kernel_rsp;
     uint64_t nest_phys = (uint64_t)pmm_alloc_page();
@@ -570,6 +581,8 @@ int container_exec(int id, const char *path, int argc, char **argv, char **envp)
     user_mode_set_return(host_mode ? 0 : shell_exec_done);
     user_mode_begin();
     user_mode_enter(entry, rsp);
+    if (is_android_app_path(path) && proc_current())
+        user_wm_release(proc_current()->pid);
     if (!host_mode)
         return 0; /* control never resumes here in kernel-context mode */
     syscall_kernel_rsp = outer_scrsp;

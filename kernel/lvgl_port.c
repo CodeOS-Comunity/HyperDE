@@ -17,6 +17,7 @@
 #include "string.h"
 #include "mm.h"
 #include "input.h"
+#include "user_wm.h"
 
 #include "lvgl/lvgl.h"
 
@@ -61,6 +62,11 @@ static void lvgl_pointer_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
                           : LV_INDEV_STATE_RELEASED;
     else
         data->state = LV_INDEV_STATE_RELEASED;
+
+    /* Android app windows: route pointer events + compose canvases. */
+    user_wm_input_pointer(data->point.x, data->point.y,
+                          data->state == LV_INDEV_STATE_PRESSED);
+    user_wm_tick();
 }
 
 static uint32_t lvgl_keymap(int key) {
@@ -89,7 +95,10 @@ static void lvgl_keypad_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
         data->key = lvgl_keymap(ev.keycode);
         data->state = ev.pressed ? LV_INDEV_STATE_PRESSED
                                  : LV_INDEV_STATE_RELEASED;
+        /* Android app windows: mirror key events if an app window is active. */
+        user_wm_input_key((uint8_t)data->key, ev.pressed ? 1 : 0);
     }
+    user_wm_tick();
 }
 
 void lvgl_port_set_input_enabled(int enabled) {

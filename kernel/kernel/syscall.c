@@ -27,6 +27,7 @@
 #include "rng.h"
 #include "ai.h"
 #include "apphost.h"
+#include "user_wm.h"
 #include "ow_http.h"
 #include "socket.h"
 #include "../arch/x86_64/fb.h"
@@ -1829,6 +1830,14 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
     case SYSCALL_OPEN:
         return sys_open((const char *)a1, (int)a2);
     case SYSCALL_READ:
+        /* Android app event channel (user-window bridge, fd 4). */
+        if ((int)a1 == UW_FD_EVT && proc_current() &&
+            user_wm_active(proc_current()->pid)) {
+            uint8_t kbuf[512];
+            int n = user_wm_events_out(proc_current()->pid, kbuf, sizeof(kbuf));
+            if (n > 0 && copy_to_user(a2, kbuf, n) < 0) return -1;
+            return n;
+        }
         return sys_read((int)a1, a2, a3);
     case SYSCALL_LSEEK:
         return sys_lseek((int)a1, (int64_t)a2, (int)a3);
@@ -2203,6 +2212,16 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
         return ac97_is_playing() ? 1 : 0;
     }
     case SYSCALL_PWRITE:
+        /* Android app command channel (user-window bridge, fd 3). */
+        if ((int)a1 == UW_FD_CMD && proc_current() &&
+            user_wm_active(proc_current()->pid)) {
+            uint8_t kbuf[512];
+            int len = (int)a3;
+            if (len <= 0) return 0;
+            if (len > (int)sizeof(kbuf)) len = (int)sizeof(kbuf);
+            if (copy_from_user(kbuf, a2, (uint64_t)len) < 0) return -1;
+            return user_wm_msg_in(proc_current()->pid, kbuf, len);
+        }
         if (fd_verify((int)a1))
             return sys_write_file((int)a1, a2, (int)a3);
         return kernel_write((int)a1, (const void *)a2, (int)a3);

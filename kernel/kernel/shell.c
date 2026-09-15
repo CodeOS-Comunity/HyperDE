@@ -41,6 +41,7 @@
 #include "version.h"
 static void run_builtin(int argc, char **argv);
 static int str_to_int(const char *s);
+extern void cmd_waydroid(int argc, char **argv);
 
 #define CMD_BUF_SIZE 256
 #define MAX_ARGS     32
@@ -249,7 +250,7 @@ static const char *builtins[] = {
         "sleep", "repeat", "seq", "script", "yes", "true", "false",
     "wc", "head", "hexdump", "calc",         "date", "rev", "run", "sort",
     "cp", "mv", "shutdown", "df", "du", "id", "su", "sudo", "root", "container", "appvm", "kill", "ps",
-    "login", "passwd", "useradd", "userdel", "users",
+    "waydroid", "login", "passwd", "useradd", "userdel", "users",
     "chmod", "chown", "tail", "grep", "find", "ln", "dd",
     "source", "type", "less", "time", "tee", "tr", "nl", "fold",
     "basename", "dirname", "tty", "logname", "nproc", "realpath",
@@ -2475,7 +2476,7 @@ static void cmd_appvm(int argc, char **argv) {
             char path[FS_PATH_MAX];
             sprintf(path, "/containers/images/img_%d", i);
             int is_dir;
-            if (fs_resolve(path, &is_dir) == 0 && is_dir) {
+            if (fs_resolve(path, &is_dir) >= 0 && is_dir) {
                 kprintf("%-32s %s\n", path, path);
                 found = 1;
             }
@@ -3789,6 +3790,7 @@ static void run_builtin(int argc, char **argv) {
     else if (strcmp(cmd, "root") == 0) cmd_root(argc, argv);
     else if (strcmp(cmd, "container") == 0) cmd_container(argc, argv);
     else if (strcmp(cmd, "appvm") == 0) cmd_appvm(argc, argv);
+    else if (strcmp(cmd, "waydroid") == 0) cmd_waydroid(argc, argv);
     else if (strcmp(cmd, "login") == 0) cmd_login(argc, argv);
     else if (strcmp(cmd, "passwd") == 0) cmd_passwd(argc, argv);
     else if (strcmp(cmd, "useradd") == 0) cmd_useradd(argc, argv);
