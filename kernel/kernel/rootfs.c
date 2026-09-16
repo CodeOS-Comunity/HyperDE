@@ -472,8 +472,18 @@ int rootfs_add_android_stock(void) {
 /* ─── Seed the Android stock container image ───
  * Materializes a minimal container root at
  *   /containers/images/android-stock/{init,bin/sh,system/bin/run-as}
- * by copying the boot-time /bin/run-as ELF into each location. The root is
- * used directly by container_create/start/exec (see container.c). */
+ * plus build.prop and the bundled apps at
+ *   /containers/images/android-stock/system/app/<name>/<name>
+ * by copying the boot-time /bin/run-as and /bin/android-* ELFs into place.
+ * The root is used directly by container_create/start/exec (see container.c).
+ * Fully idempotent: existing files are skipped. */
+const char *const rootfs_android_apps[ROOTFS_ANDROID_APP_COUNT + 1] = {
+    "android-launcher", "android-clock", "android-calculator",
+    "android-settings", "android-dialer", "android-music",
+    "android-browser",  "android-camera", "android-calendar",
+    "android-keyboard", NULL
+};
+
 int rootfs_seed_android_stock(void) {
     const char *base = "/containers/images/android-stock";
     char boot_elf[FS_CONTENT_MAX];
@@ -520,6 +530,58 @@ int rootfs_seed_android_stock(void) {
             continue;
         }
         kprintf("[rootfs] android-stock: seeded %s\n", targets[i]);
+    }
+
+    /* ── Android metadata + bundled apps (idempotent) ──
+     * The stock image ships complete (build.prop + all 10 apps under
+     * /system/app/<name>/<name>) so plain appvm/container use of the
+     * image works without a separate install step. */
+    {
+        char dir[FS_PATH_MAX];
+        snprintf(dir, sizeof(dir), "%s/system", base);
+        fs_mkdir(dir);
+        snprintf(dir, sizeof(dir), "%s/system/app", base);
+        fs_mkdir(dir);
+
+        char prop[FS_PATH_MAX];
+        snprintf(prop, sizeof(prop), "%s/system/build.prop", base);
+        if (fs_resolve(prop, &is_dir) < 0) {
+            static const char prop_content[] =
+                "# Waydroid build fingerprint (CodeOS)\n"
+                "ro.build.fingerprint=CodeOS/waydroid/x86_64:12/SKQ1.211006.001/waydroid:user/release-keys\n"
+                "ro.build.version.sdk=31\n"
+                "ro.build.version.release=12\n"
+                "ro.product.model=CodeOS Android\n"
+                "ro.product.device=waydroid\n"
+                "ro.hardware=codeos\n"
+                "ro.secure=0\n"
+                "ro.debuggable=1\n"
+                "persist.sys.dalvik.vm.lib.2=libart.so\n";
+            if (fs_mkfile(prop) == 0)
+                fs_write(prop, prop_content, (int)sizeof(prop_content) - 1);
+            kprintf("[rootfs] android-stock: wrote %s/system/build.prop\n", base);
+        }
+    }
+
+    for (int i = 0; i < ROOTFS_ANDROID_APP_COUNT; i++) {
+        const char *app = rootfs_android_apps[i];
+        char src[FS_PATH_MAX], appdir[FS_PATH_MAX], dst[FS_PATH_MAX];
+        snprintf(src, sizeof(src), "/bin/%s", app);
+        snprintf(appdir, sizeof(appdir), "%s/system/app/%s", base, app);
+        snprintf(dst, sizeof(dst), "%s/%s", appdir, app);
+        if (fs_resolve(dst, &is_dir) >= 0) continue; /* already installed */
+        int an = fs_read(src, boot_elf, sizeof(boot_elf));
+        if (an <= 0) {
+            kprintf("[rootfs] android-stock: skip %s (not present)\n", app);
+            continue;
+        }
+        fs_mkdir(appdir);
+        if (fs_mkfile(dst) < 0) {
+            kprintf("[rootfs] android-stock: cannot create %s\n", dst);
+            continue;
+        }
+        fs_write(dst, boot_elf, an);
+        kprintf("[rootfs] android-stock: installed app %s\n", app);
     }
 
     return 0;

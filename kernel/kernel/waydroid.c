@@ -27,14 +27,9 @@
 #include "rootfs.h"
 #include "user_wm.h"
 
-/* ─── bundled Android apps (names installed from /bin/android-<name>) ───
+/* App name list lives in rootfs.c (rootfs_android_apps): the seed owns the
+ * android-stock image and installs /bin/android-* into /system/app there.
  * Keep in sync with ANDROID_PROGS in kernel/userspace/Makefile. */
-static const char *wd_app_names[WAYDROID_MAX_APPS] = {
-    "android-launcher", "android-clock", "android-calculator",
-    "android-settings", "android-dialer", "android-music",
-    "android-browser",  "android-camera", "android-calendar",
-    "android-keyboard", 0
-};
 
 struct wd_display {
     const char *elf;
@@ -62,94 +57,22 @@ static const char *wd_label_for(const char *elf) {
     return elf;
 }
 
-static void wd_app_dir(char *out, size_t outsz, const char *app) {
-    snprintf(out, outsz, "%s/system/app/%s", WAYDROID_IMAGE_ROOT, app);
-}
-
 static void wd_app_path(char *out, size_t outsz, const char *app) {
     snprintf(out, outsz, "%s/system/app/%s/%s", WAYDROID_IMAGE_ROOT, app, app);
 }
 
-static int wd_install_one(const char *name) {
-    char src[FS_PATH_MAX];
-    char dir[FS_PATH_MAX];
-    char dst[FS_PATH_MAX];
-    char buf[FS_CONTENT_MAX];
-    int is_dir;
-
-    snprintf(src, sizeof(src), "/bin/%s", name);
-    if (fs_resolve(src, &is_dir) < 0) {
-        kprintf("waydroid: note: /bin/%s not present, skipping install\n", name);
-        return 0;
-    }
-
-    wd_app_dir(dir, sizeof(dir), name);
-    wd_app_path(dst, sizeof(dst), name);
-
-    if (fs_resolve(dst, &is_dir) >= 0) {
-        kprintf("waydroid: %s already installed\n", name);
-        return 0;
-    }
-
-    int n = fs_read(src, buf, FS_CONTENT_MAX);
-    if (n <= 0) {
-        kprintf("waydroid: failed to read %s\n", src);
-        return -1;
-    }
-
-    /* ensure /system/app exists, then the app dir */
-    fs_mkdir(WAYDROID_IMAGE_ROOT "/system");
-    fs_mkdir(WAYDROID_IMAGE_ROOT "/system/app");
-    fs_mkdir(dir);
-    if (fs_mkfile(dst) < 0) {
-        kprintf("waydroid: failed to create %s\n", dst);
-        return -1;
-    }
-    fs_write(dst, buf, n);
-    kprintf("waydroid: installed %s (%d bytes)\n", name, n);
-    return 0;
-}
-
 int waydroid_init(void) {
     int ok = 0;
-    int have_image;
 
-    /* Seed the guest image only once: boot already materializes it, and
-     * re-seeding would churn the fs tree (the seed is not idempotent). */
-    if (fs_resolve(WAYDROID_IMAGE_ROOT "/init", &have_image) < 0) {
-        if (rootfs_seed_android_stock() < 0) {
-            kprintf("waydroid: init failed: could not seed %s image\n", WAYDROID_IMAGE_NAME);
-            return -1;
-        }
+    /* The android-stock image ships complete (base + build.prop + apps);
+     * the seed is idempotent, so re-running init is a cheap no-op. */
+    if (rootfs_seed_android_stock() < 0) {
+        kprintf("waydroid: init failed: could not seed %s image\n", WAYDROID_IMAGE_NAME);
+        return -1;
     }
 
-    /* Write a small build.prop so the guest has Android metadata. */
-    {
-        char prop[FS_PATH_MAX];
-        char content[512];
-        snprintf(prop, sizeof(prop), "%s/system/build.prop", WAYDROID_IMAGE_ROOT);
-        fs_mkdir(WAYDROID_IMAGE_ROOT "/system");
-        int n = snprintf(content, sizeof(content),
-            "# Waydroid build fingerprint (CodeOS)\n"
-            "ro.build.fingerprint=CodeOS/waydroid/x86_64:12/SKQ1.211006.001/waydroid:user/release-keys\n"
-            "ro.build.version.sdk=31\n"
-            "ro.build.version.release=12\n"
-            "ro.product.model=CodeOS Android\n"
-            "ro.product.device=waydroid\n"
-            "ro.hardware=codeos\n"
-            "ro.secure=0\n"
-            "ro.debuggable=1\n"
-            "persist.sys.dalvik.vm.lib.2=libart.so\n");
-        if (n < 0) n = 0;
-        if (n > (int)sizeof(content) - 1) n = (int)sizeof(content) - 1;
-        fs_mkfile(prop);
-        fs_write(prop, content, n);
-        kprintf("waydroid: wrote %s/system/build.prop\n", WAYDROID_IMAGE_ROOT);
-    }
-
-    for (int i = 0; wd_app_names[i]; i++)
-        if (wd_install_one(wd_app_names[i]) == 0)
-            ok++;
+    for (int i = 0; i < ROOTFS_ANDROID_APP_COUNT; i++)
+        if (waydroid_app_installed(rootfs_android_apps[i])) ok++;
 
     kprintf("waydroid: init complete (%d apps ready)\n", ok);
     return 0;
@@ -255,8 +178,8 @@ int waydroid_app_launch(const char *app) {
 
 int waydroid_app_list(char *buf, int max) {
     int n = 0;
-    for (int i = 0; wd_app_names[i]; i++) {
-        const char *name = wd_app_names[i];
+    for (int i = 0; i < ROOTFS_ANDROID_APP_COUNT; i++) {
+        const char *name = rootfs_android_apps[i];
         const char *label = wd_label_for(name);
         int installed = waydroid_app_installed(name);
         /* NB: the kernel snprintf has no '-' flag, so pad right-aligned. */

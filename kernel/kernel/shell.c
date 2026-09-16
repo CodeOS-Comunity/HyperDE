@@ -33,6 +33,7 @@
 #include "elf.h"
 #include "installer.h"
 #include "container.h"
+#include "rootfs.h"
 #include "updater.h"
 #include "editor.h"
 #include "clamav.h"
@@ -2340,7 +2341,7 @@ static void cmd_sudo(int argc, char **argv) {
 
 static void cmd_container(int argc, char **argv) {
     if (argc < 2) {
-        kprintf("usage: container create <name> <root-path>\n");
+        kprintf("usage: container create <name> <image>\n");
         kprintf("       container destroy <id|name>\n");
         kprintf("       container exec <id|name> <binary> [args...]\n");
         kprintf("       container list\n");
@@ -2349,7 +2350,7 @@ static void cmd_container(int argc, char **argv) {
     if (strcmp(argv[1], "create") == 0 && argc >= 4) {
         int id = container_create(argv[2], argv[3]);
         if (id < 0) kprintf("container create: failed\n");
-        else kprintf("container created: id=%d name='%s' root='%s'\n", id, argv[2], argv[3]);
+        else kprintf("container created: id=%d name='%s' image='%s'\n", id, argv[2], argv[3]);
     } else if (strcmp(argv[1], "destroy") == 0 && argc >= 3) {
         int id = str_to_int(argv[2]);
         if (id <= 0) {
@@ -2448,6 +2449,9 @@ static void cmd_appvm(int argc, char **argv) {
             return;
         }
         if (arg_idx < argc) {
+            /* exec needs the container in the running state: boot pid-1
+             * first, then run the requested command inside it. */
+            if (container_start(id) < 0) return;
             container_exec(id, argv[arg_idx], argc - arg_idx, argv + arg_idx, 0);
         } else {
             container_start(id);
@@ -2471,17 +2475,42 @@ static void cmd_appvm(int argc, char **argv) {
     } else if (strcmp(argv[1], "images") == 0) {
         kprintf("%-32s %s\n", "IMAGE NAME", "ROOT");
         kprintf("──────────────────────────────────────────\n");
-        int found = 0;
-        for (int i = 0; i < 16; i++) {
-            char path[FS_PATH_MAX];
-            sprintf(path, "/containers/images/img_%d", i);
-            int is_dir;
-            if (fs_resolve(path, &is_dir) >= 0 && is_dir) {
-                kprintf("%-32s %s\n", path, path);
-                found = 1;
+        char names[16][FS_NAME_MAX];
+        int n = fs_listdir("/containers/images", names, 16);
+        if (n <= 0) {
+            kprintf("(no images)\n");
+        } else {
+            for (int i = 0; i < n; i++) {
+                if (!names[i][0]) continue;
+                char img_root[FS_PATH_MAX];
+                snprintf(img_root, sizeof(img_root), "/containers/images/%s", names[i]);
+                kprintf("%-32s %s\n", names[i], img_root);
             }
         }
-        if (!found) kprintf("(no images)\n");
+    } else if (strcmp(argv[1], "pull") == 0 && argc >= 3) {
+        const char *image = argv[2];
+        char img_root[FS_PATH_MAX];
+        snprintf(img_root, sizeof(img_root), "/containers/images/%s", image);
+        int is_dir;
+        if (fs_resolve(img_root, &is_dir) >= 0 && is_dir) {
+            kprintf("appvm: image '%s' already present\n", image);
+            return;
+        }
+        if (strcmp(image, "debian-minimal") == 0) {
+            kprintf("appvm: pulling debian-minimal...\n");
+            rootfs_extract_debian_minimal();
+        } else if (strcmp(image, "android-stock") == 0 ||
+                   strncmp(image, "android", 7) == 0) {
+            kprintf("appvm: pulling %s...\n", image);
+            rootfs_seed_android_stock();
+        } else {
+            kprintf("appvm: pull: unknown image '%s' (no source)\n", image);
+            return;
+        }
+        if (fs_resolve(img_root, &is_dir) >= 0 && is_dir)
+            kprintf("appvm: image '%s' ready\n", image);
+        else
+            kprintf("appvm: pull failed for '%s'\n", image);
     } else if (strcmp(argv[1], "exec") == 0 && argc >= 4) {
         int id = resolve_container(argv[2]);
         if (id <= 0) { kprintf("appvm: unknown container '%s'\n", argv[2]); return; }

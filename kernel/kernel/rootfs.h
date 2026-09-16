@@ -89,6 +89,13 @@ int rootfs_extract_debian_minimal(void);
 /* ─── Android stock container image  ─── */
 int rootfs_seed_android_stock(void);
 
+/* Bundled Android apps: installed into the android-stock image at
+ * /system/app/<name>/<name> (copied from /bin/android-<name>) so the
+ * image is complete out of the box. NULL-terminated; keep in sync with
+ * ANDROID_PROGS in kernel/userspace/Makefile. */
+#define ROOTFS_ANDROID_APP_COUNT 10
+extern const char *const rootfs_android_apps[];
+
 /* ─── Disk usage ─── */
 uint64_t rootfs_get_disk_usage(int id);
 uint64_t rootfs_get_total_disk_usage(void);

@@ -9,7 +9,6 @@
 #define WAYDROID_CONT_NAME  "android"
 #define WAYDROID_IMAGE_NAME "android-stock"
 #define WAYDROID_IMAGE_ROOT "/containers/images/android-stock"
-#define WAYDROID_MAX_APPS   16
 
 /* Seed/install step: materialize the guest image and install the bundled
  * android apps into /system/app. Idempotent. */
