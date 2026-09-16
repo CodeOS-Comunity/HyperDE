@@ -1377,16 +1377,19 @@ void QtLauncherOverlay::hideLauncher() { m_open = false; m_searchText.clear(); m
 
 void QtLauncherOverlay::updateGrid() {
     m_filteredNames.clear();
-    /* COSMIC-style fuzzy search: prefix ranks first, then substring matches */
+    /* COSMIC-style fuzzy search: prefix ranks first, then substring matches.
+     * LaunchApp is a dock-only picker — keep it out of the grid so selecting
+     * it can't toggle/close the overlay. */
     QList<QPair<QString,int>> tagged;
     if (m_searchText.isEmpty()) {
-        for (int i = 0; i < m_appNames.size(); i++) tagged.append({m_appNames[i], i});
+        for (int i = 0; i < m_appNames.size(); i++)
+            if (i != LAUNCHAPP_INDEX) tagged.append({m_appNames[i], i});
     } else {
         QString q = m_searchText.toLower();
         for (int i = 0; i < m_appNames.size(); i++) {
             QString n = m_appNames[i];
             QString l = n.toLower();
-            if (l.contains(q)) tagged.append({n, i});
+            if (l.contains(q) && i != LAUNCHAPP_INDEX) tagged.append({n, i});
         }
         /* stable sort: prefix matches float to the front */
         std::stable_sort(tagged.begin(), tagged.end(), [&](const QPair<QString,int>&a, const QPair<QString,int>&b){

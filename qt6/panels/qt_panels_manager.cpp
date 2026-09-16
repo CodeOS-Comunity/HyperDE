@@ -186,7 +186,8 @@ bool QtDesktopManager::init() {
     if (sw == 0 || sh == 0) return false;
     m_appNames = QStringList{"Terminal","About","Calc","Settings","OpenWeb",
                              "Explorer","Exit","Sys Info","SysMon",
-                             "Install CodeOS","LT","NetBeam","Ziggy","Notes","Clock","Convert"};
+                             "Install CodeOS","LT","NetBeam","Ziggy","Notes","Clock",
+                             "Convert","LaunchApp"};
     mouse_set_bounds(sw, sh);
     lvgl_wm_init(&m_wm, sw, sh, 30);
     codeos_font_init();
@@ -327,6 +328,9 @@ void QtDesktopManager::launchApp(int index) {
     case 13: registerWin(new QtNotesWidget(m_desktop), 560, 640); break;
     case 14: registerWin(new QtClockWidget(m_desktop), 560, 640); break;
     case 15: registerWin(new QtConvertWidget(m_desktop), 560, 640); break;
+    case LAUNCHAPP_INDEX: /* dock-only: open the fullscreen app picker */
+        toggleLauncher();
+        break;
     default:
         kprintf("Qt6: App %d '%s' launched (stub)\n", index,
                 m_appNames.value(index).toUtf8().constData());
@@ -613,6 +617,11 @@ void QtDesktopManager::run() {
         if (m_ctxMenu) m_ctxMenu->showMenu(gp.x(), gp.y(), items, actions);
     };
     m_dock->onItemClicked = [this](int i) {
+        /* The LaunchApp dock icon opens the fullscreen app picker. */
+        if (i == LAUNCHAPP_INDEX) {
+            toggleLauncher();
+            return;
+        }
         launchApp(i);
         if (i >= 0 && i < m_appNames.size())
             showToast("Opening " + m_appNames[i] + "...", appIconColor(m_appNames[i]));
