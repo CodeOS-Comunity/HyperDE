@@ -497,6 +497,17 @@ static int is_android_app_path(const char *path) {
 }
 
 /* ─── Execute inside a running container ─── */
+/* Mark a freshly-created container as RUNNING without booting an
+ * entrypoint, so a command can be exec'd directly (namespaces + cgroup
+ * were set up by container_create). Used by `appvm run <img> <cmd>`. */
+int container_mark_running(int id) {
+    container_t *c = container_get(id);
+    if (!c) return -1;
+    if (c->state != CONTAINER_CREATED) return -1;
+    c->state = CONTAINER_RUNNING;
+    return 0;
+}
+
 int container_exec(int id, const char *path, int argc, char **argv, char **envp) {
     int saved_ns[PROC_NS_MAX];
     int saved_cg, saved_uid, saved_gid, saved_euid, saved_egid;

@@ -2449,10 +2449,17 @@ static void cmd_appvm(int argc, char **argv) {
             return;
         }
         if (arg_idx < argc) {
-            /* exec needs the container in the running state: boot pid-1
-             * first, then run the requested command inside it. */
-            if (container_start(id) < 0) return;
+            /* docker-style: run the command directly in the fresh container
+             * (namespaces/cgroup exist from create; no entrypoint boot, so
+             * this works for images without a real init too), then remove
+             * the temporary container once the command exits. */
+            if (container_mark_running(id) < 0) {
+                kprintf("appvm: run: could not activate container '%s'\n", cname);
+                return;
+            }
             container_exec(id, argv[arg_idx], argc - arg_idx, argv + arg_idx, 0);
+            container_destroy(id);
+            kprintf("appvm: removed container '%s'\n", cname);
         } else {
             container_start(id);
         }

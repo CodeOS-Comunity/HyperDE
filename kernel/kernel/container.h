@@ -88,6 +88,7 @@ int container_start(int id);
 int container_stop(int id);
 int container_restart(int id);
 int container_destroy(int id);
+int container_mark_running(int id);
 int container_exec(int id, const char *path, int argc, char **argv, char **envp);
 int container_list(char out[][CONTAINER_NAME_MAX], int max);
 int container_list_all(char out[][CONTAINER_NAME_MAX], int max);
