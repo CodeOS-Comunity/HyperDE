@@ -837,8 +837,8 @@ int64_t linux_syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
         if (a3 <= 0 || a3 > 1024) return -LINUX_EINVAL;
         uint8_t rcvbuf[1024];
         sockaddr_t src;
-        int r = socket_recvfrom(sock, rcvbuf, (int)a3, (int)a4,
-                                a5 ? &src : 0, a6 ? (int *)a6 : (int *)&src);
+        int r = socket_recvfrom_nb(sock, rcvbuf, (int)a3, (int)a4,
+                                   a5 ? &src : 0, a6 ? (int *)a6 : (int *)&src);
         if (r < 0) return -LINUX_EWOULDBLOCK;
         if (copy_to_user(a2, rcvbuf, (uint64_t)r) < 0) return -LINUX_EFAULT;
         if (a5 && a6) {

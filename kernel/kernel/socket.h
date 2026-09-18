@@ -84,6 +84,8 @@ int  socket_sendto(int fd, const void *buf, int len, int flags,
 int  socket_recv(int fd, void *buf, int len, int flags);
 int  socket_recvfrom(int fd, void *buf, int len, int flags,
                      sockaddr_t *addr, int *addrlen);
+int  socket_recvfrom_nb(int fd, void *buf, int len, int flags,
+                        sockaddr_t *addr, int *addrlen);
 int  socket_close(int fd);
 int  socket_setsockopt(int fd, int level, int opt, const void *val, int len);
 int  socket_getsockopt(int fd, int level, int opt, void *val, int *len);

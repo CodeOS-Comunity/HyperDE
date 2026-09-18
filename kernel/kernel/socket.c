@@ -277,6 +277,31 @@ int socket_recvfrom(int fd, void *buf, int len, int flags, sockaddr_t *addr, int
     return r;
 }
 
+/* Non-blocking receive: returns -1 immediately when no datagram is queued.
+ * Used by the Linux-compat recvfrom, whose callers poll and expect EAGAIN
+ * rather than a multi-second block. */
+int socket_recvfrom_nb(int fd, void *buf, int len, int flags, sockaddr_t *addr, int *addrlen) {
+    (void)flags;
+    if (fd < 0 || fd >= SOCK_MAX_BIND) return -1;
+    spin_lock(&sock_lock);
+    if (!sockets[fd].in_use) { spin_unlock(&sock_lock); return -1; }
+    int type = sockets[fd].type;
+    int udp_fd = sock_udp_fd[fd];
+    spin_unlock(&sock_lock);
+    if (type == SOCK_STREAM) {
+        /* No non-blocking TCP path yet; fall back to the existing receive. */
+        return socket_recv(fd, buf, len, flags);
+    }
+    if (udp_fd < 0) return -1;
+    uint32_t sip = 0; uint16_t sport = 0;
+    int r = udp_recv_timeout(udp_fd, buf, len, &sip, &sport, 0);
+    if (r >= 0 && addr && addrlen && *addrlen >= (int)sizeof(sockaddr_in_t)) {
+        sock_to_addr(addr, sip, sport);
+        *addrlen = sizeof(sockaddr_in_t);
+    }
+    return r;
+}
+
 int socket_setsockopt(int fd, int level, int opt, const void *val, int len) {
     (void)level; (void)opt; (void)val; (void)len;
     if (fd < 0 || fd >= SOCK_MAX_BIND || !sockets[fd].in_use) return -1;

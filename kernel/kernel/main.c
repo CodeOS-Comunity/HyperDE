@@ -644,8 +644,17 @@ void kernel_main(uint32_t magic __attribute__((unused)),
     extern int compat_probe_run(void);
     extern int compat_probe_finished(void);
     compat_probe_run();
-    while (!compat_probe_finished())
-        sched_yield();
+    {
+        /* Belt-and-suspenders: never let a stalled probe hold up boot.
+         * The probe is diagnostic only, so give it a bounded window and
+         * carry on if it hasn't reported back. */
+        uint64_t lp_start = timer_get_milliseconds();
+        while (!compat_probe_finished() &&
+               timer_get_milliseconds() - lp_start < 10000)
+            sched_yield();
+        if (!compat_probe_finished())
+            kprintf("LPROBE: timed out; continuing boot\n");
+    }
 #endif
 
     /* ─────────────────────────────────────────────────────────────────

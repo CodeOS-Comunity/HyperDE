@@ -132,6 +132,13 @@ int udp_recv_timeout(int fd, void *buf, int len, uint32_t *src_ip, uint16_t *src
     if (!buf || len <= 0) return -1;
     spin_lock(&udp_lock);
     if (!sockets[fd].in_use) { spin_unlock(&udp_lock); return -1; }
+    /* timeout_ms == 0 means "poll once" (non-blocking): return immediately
+     * instead of entering the sleep loop, which can stall for the full
+     * timeout when no datagram ever arrives. */
+    if (sockets[fd].rx_count <= 0 && timeout_ms == 0) {
+        spin_unlock(&udp_lock);
+        return -1;
+    }
     uint64_t start = timer_get_milliseconds();
     while (sockets[fd].rx_count <= 0) {
         if (!sockets[fd].in_use) { spin_unlock(&udp_lock); return -1; }
