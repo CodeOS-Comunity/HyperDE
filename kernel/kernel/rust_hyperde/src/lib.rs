@@ -205,6 +205,39 @@ extern "C" {
     fn kprintf(fmt: *const c_char, ...);
 }
 
+/* ── X11/GNUstep windows as first-class desktop citizens ────────────
+ * Layout mirrors prs_desktop_win_t in kernel/kernel/penrose_bridge.h. */
+
+const PRS_WIN_MAX: usize = 32;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct PrsDesktopWin {
+    xid: u32,
+    x: i16,
+    y: i16,
+    w: i16,
+    h: i16,
+    mapped: u8,
+    focused: u8,
+    title: [u8; 40],
+}
+
+const PRS_WIN_ZERO: PrsDesktopWin = PrsDesktopWin {
+    xid: 0,
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+    mapped: 0,
+    focused: 0,
+    title: [0; 40],
+};
+
+extern "C" {
+    fn prs_desktop_windows(buf: *mut PrsDesktopWin, max: c_int) -> c_int;
+}
+
 /* ───────────────────────── palette (XRGB8888) ─────────────────────────
  * COSMIC-style: default cyan accent, glass chrome rendered high-key so
  * the bar reads as a single translucent slab (rounded, floating). */
@@ -239,6 +272,7 @@ static LAST_MEM: AtomicU64 = AtomicU64::new(0);
 static INIT_DONE: AtomicI32 = AtomicI32::new(0);
 static CM_WM: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
 static LAST_WMSIG: AtomicU64 = AtomicU64::new(u64::MAX);
+static LAST_XSIG: AtomicU64 = AtomicU64::new(u64::MAX);
 /* workspace indicator state (kept in sync by the Qt WM via hyperde_shell_set_workspace) */
 static WS_CUR: AtomicI32 = AtomicI32::new(0);
 static WS_NUM: AtomicI32 = AtomicI32::new(6);
@@ -545,6 +579,33 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
         x += tw + 8;
     }
 
+    /* X11/GNUstep task pills follow the lvgl pills (same layout so the
+     * hit-test in hyperde_shell_bar_hit matches 1:1) */
+    {
+        let mut xwins = [PRS_WIN_ZERO; PRS_WIN_MAX];
+        let nc = prs_desktop_windows(xwins.as_mut_ptr(), PRS_WIN_MAX as c_int) as usize;
+        let mut i = 0usize;
+        while i < nc {
+            if x > (w as i64) / 2 - 150 {
+                break;
+            }
+            let xwin = xwins[i];
+            i += 1;
+            if xwin.mapped == 0 {
+                continue;
+            }
+            let mut n = 0usize;
+            while n < 9 && xwin.title[n] != 0 {
+                n += 1;
+            }
+            let tw = n as i64 * 10 + 12;
+            round_rect(buf, stride, w, h, x, mid - 9, x + tw, mid + 9, 9, 0x00FFFFFF, 0x16);
+            fill_circle(buf, stride, w, h, x + 7, mid, 3, if xwin.focused != 0 { GREEN } else { SUB }, 0xA0);
+            draw_text(buf, stride, w, h, x + 14, mid - 4, &xwin.title[..n], if xwin.focused != 0 { TEXT } else { SUB }, 1, 0xFF);
+            x += tw + 8;
+        }
+    }
+
     let rh = 18i64;
     let ry = mid - 9;
 
@@ -645,9 +706,6 @@ const WIN_CR: i64 = 12; /* rounded band corners (matches QtAppWindow cr) */
 unsafe fn render_windows(buf: *mut u32, stride: u32, w: u32, h: u32) {
     let wm = CM_WM.load(RELAX);
     let (list, lcount) = window_overview(wm);
-    if lcount == 0 {
-        return;
-    }
     /* window_overview lists focused windows first; draw in reverse so the
      * focused window ends up on top of the stack. */
     let mut k = lcount;
@@ -668,71 +726,6 @@ unsafe fn render_windows(buf: *mut u32, stride: u32, w: u32, h: u32) {
         if ry + rh <= BAR_H as i64 {
             continue;
         }
-        let focused = (*ww).focused != 0;
-
-        /* layered drop shadow at bottom edge */
-        fill_rect(buf, stride, w, h, rx + WIN_SH + 3, ry + rh + 7, rx + rw - WIN_SH - 3, ry + rh + 9, 0x00000000, 0x08);
-        fill_rect(buf, stride, w, h, rx + WIN_SH + 1, ry + rh + 4, rx + rw - WIN_SH - 1, ry + rh + 6, 0x00000000, 0x10);
-        fill_rect(buf, stride, w, h, rx + WIN_SH, ry + rh + 1, rx + rw - WIN_SH, ry + rh + 3, 0x00000000, 0x1E);
-
-        /* title band: glass gradient, rounded top corners */
-        let by0 = ry + WIN_SH;
-        let by1 = by0 + WIN_TB;
-        let x0 = rx + WIN_SH;
-        let x1 = rx + rw - WIN_SH - 1;
-        for y in by0..by1 {
-            if y < BAR_H as i64 {
-                continue;
-            }
-            let t = ((y - by0) * 255 / WIN_TB) as u32;
-            let top_r = (GLASS_TOP >> 16) & 0xFF;
-            let top_g = (GLASS_TOP >> 8) & 0xFF;
-            let top_b = GLASS_TOP & 0xFF;
-            let bot_r = (GLASS_BOT >> 16) & 0xFF;
-            let bot_g = (GLASS_BOT >> 8) & 0xFF;
-            let bot_b = GLASS_BOT & 0xFF;
-            let r = (top_r * (255 - t) + bot_r * t) / 255;
-            let g = (top_g * (255 - t) + bot_g * t) / 255;
-            let b = (top_b * (255 - t) + bot_b * t) / 255;
-            let gcol = (r << 16) | (g << 8) | b;
-            /* rounded corner clipping at the top */
-            let dy = y - by0;
-            let mut cl = 0i64;
-            let mut cx = 0i64;
-            if dy < WIN_CR {
-                let side = isqrt64(WIN_CR * WIN_CR - (WIN_CR - dy) * (WIN_CR - dy));
-                cl = WIN_CR - side;
-                cx = WIN_CR - side;
-            }
-            for x in x0 + cl..=x1 - cx {
-                glass_px(buf, stride, w, h, x, y, gcol, if focused { 0xE8 } else { 0xB0 });
-            }
-        }
-        /* top specular + bottom separator (accent when focused) */
-        for x in x0..=x1 {
-            glass_px(buf, stride, w, h, x, by0, 0x00FFFFFF, 0x22);
-            glass_px(buf, stride, w, h, x, by0 + 1, 0x00FFFFFF, 0x12);
-            if focused {
-                glass_px(buf, stride, w, h, x, by1 - 1, ACCENT, 0x88);
-            } else {
-                glass_px(buf, stride, w, h, x, by1 - 1, 0x00000000, 0x33);
-            }
-        }
-
-        /* window controls on the RIGHT of the band (COSMIC style) */
-        let dot_y = by0 + (WIN_TB - 12) / 2;
-        let gap = 20i64;
-        let close_x = rx + rw - WIN_SH - 18; /* rightmost = close */
-        let (dc, dm, dx) = if focused {
-            (CLOSE_DOT, MIN_DOT, MAX_DOT)
-        } else {
-            (0x005A5A5E, 0x005A5A5E, 0x005A5A5E)
-        };
-        fill_circle(buf, stride, w, h, close_x, dot_y + 6, 6, dc, 0xFF);
-        fill_circle(buf, stride, w, h, close_x - gap, dot_y + 6, 6, dm, 0xFF);
-        fill_circle(buf, stride, w, h, close_x - gap * 2, dot_y + 6, 6, dx, 0xFF);
-
-        /* centered title between the left inset and the controls */
         let mut s = [0u8; 40];
         let mut n = 0usize;
         for cc in (*ww).title {
@@ -745,27 +738,132 @@ unsafe fn render_windows(buf: *mut u32, stride: u32, w: u32, h: u32) {
             s[n] = cc as u8;
             n += 1;
         }
-        let tw = n as i64 * 10;
-        let tcx = (x0 + close_x - gap * 2) / 2;
-        draw_text(
-            buf, stride, w, h,
-            tcx - tw / 2,
-            by0 + (WIN_TB - 8) / 2 - 1,
-            &s[..n],
-            if focused { TEXT } else { SUB },
-            1, 0xFF,
-        );
+        draw_window_chrome(buf, stride, w, h, rx, ry, rw, rh, (*ww).focused != 0, &s[..n]);
+    }
 
-        /* focus ring: 1px accent rect around the body */
+    /* X11/GNUstep windows get the same macOS chrome. penrose windows
+     * composite above the Qt stack, so they are drawn after (on top of)
+     * lvgl windows, in reverse so raised windows stay on top. */
+    let mut xwins = [PRS_WIN_ZERO; PRS_WIN_MAX];
+    let nc = prs_desktop_windows(xwins.as_mut_ptr(), PRS_WIN_MAX as c_int) as usize;
+    let mut i = nc;
+    while i > 0 {
+        i -= 1;
+        let win = xwins[i];
+        if win.mapped == 0 {
+            continue;
+        }
+        let rx = win.x as i64;
+        let ry = win.y as i64;
+        let rw = win.w as i64;
+        let rh = win.h as i64;
+        if rw <= 0 || rh <= 0 {
+            continue;
+        }
+        /* entirely above the bar — nothing to compose */
+        if ry + rh <= BAR_H as i64 {
+            continue;
+        }
+        let mut n = 0usize;
+        while n < win.title.len() && win.title[n] != 0 {
+            n += 1;
+        }
+        draw_window_chrome(buf, stride, w, h, rx, ry, rw, rh, win.focused != 0, &win.title[..n]);
+    }
+}
+
+/* macOS-style chrome for one window body, shared by the lvgl/Qt pass and
+ * the X11/GNUstep pass so both window families look identical: layered
+ * drop shadow, glass title band with rounded top corners + specular edge,
+ * COSMIC traffic-light controls, centered title, accent focus ring. */
+unsafe fn draw_window_chrome(
+    buf: *mut u32, stride: u32, w: u32, h: u32,
+    rx: i64, ry: i64, rw: i64, rh: i64,
+    focused: bool, title: &[u8],
+) {
+    /* layered drop shadow at bottom edge */
+    fill_rect(buf, stride, w, h, rx + WIN_SH + 3, ry + rh + 7, rx + rw - WIN_SH - 3, ry + rh + 9, 0x00000000, 0x08);
+    fill_rect(buf, stride, w, h, rx + WIN_SH + 1, ry + rh + 4, rx + rw - WIN_SH - 1, ry + rh + 6, 0x00000000, 0x10);
+    fill_rect(buf, stride, w, h, rx + WIN_SH, ry + rh + 1, rx + rw - WIN_SH, ry + rh + 3, 0x00000000, 0x1E);
+
+    /* title band: glass gradient, rounded top corners */
+    let by0 = ry + WIN_SH;
+    let by1 = by0 + WIN_TB;
+    let x0 = rx + WIN_SH;
+    let x1 = rx + rw - WIN_SH - 1;
+    for y in by0..by1 {
+        if y < BAR_H as i64 {
+            continue;
+        }
+        let t = ((y - by0) * 255 / WIN_TB) as u32;
+        let top_r = (GLASS_TOP >> 16) & 0xFF;
+        let top_g = (GLASS_TOP >> 8) & 0xFF;
+        let top_b = GLASS_TOP & 0xFF;
+        let bot_r = (GLASS_BOT >> 16) & 0xFF;
+        let bot_g = (GLASS_BOT >> 8) & 0xFF;
+        let bot_b = GLASS_BOT & 0xFF;
+        let r = (top_r * (255 - t) + bot_r * t) / 255;
+        let g = (top_g * (255 - t) + bot_g * t) / 255;
+        let b = (top_b * (255 - t) + bot_b * t) / 255;
+        let gcol = (r << 16) | (g << 8) | b;
+        /* rounded corner clipping at the top */
+        let dy = y - by0;
+        let mut cl = 0i64;
+        let mut cx = 0i64;
+        if dy < WIN_CR {
+            let side = isqrt64(WIN_CR * WIN_CR - (WIN_CR - dy) * (WIN_CR - dy));
+            cl = WIN_CR - side;
+            cx = WIN_CR - side;
+        }
+        for x in x0 + cl..=x1 - cx {
+            glass_px(buf, stride, w, h, x, y, gcol, if focused { 0xE8 } else { 0xB0 });
+        }
+    }
+    /* top specular + bottom separator (accent when focused) */
+    for x in x0..=x1 {
+        glass_px(buf, stride, w, h, x, by0, 0x00FFFFFF, 0x22);
+        glass_px(buf, stride, w, h, x, by0 + 1, 0x00FFFFFF, 0x12);
         if focused {
-            for x in x0..=x1 {
-                glass_px(buf, stride, w, h, x, by1 - 1, ACCENT, 0x88);
-                glass_px(buf, stride, w, h, x, ry + rh - WIN_SH, ACCENT, 0x38);
-            }
-            for y in by0..ry + rh - WIN_SH {
-                glass_px(buf, stride, w, h, x0, y, ACCENT, 0x30);
-                glass_px(buf, stride, w, h, x1, y, ACCENT, 0x30);
-            }
+            glass_px(buf, stride, w, h, x, by1 - 1, ACCENT, 0x88);
+        } else {
+            glass_px(buf, stride, w, h, x, by1 - 1, 0x00000000, 0x33);
+        }
+    }
+
+    /* window controls on the RIGHT of the band (COSMIC style) */
+    let dot_y = by0 + (WIN_TB - 12) / 2;
+    let gap = 20i64;
+    let close_x = rx + rw - WIN_SH - 18; /* rightmost = close */
+    let (dc, dm, dx) = if focused {
+        (CLOSE_DOT, MIN_DOT, MAX_DOT)
+    } else {
+        (0x005A5A5E, 0x005A5A5E, 0x005A5A5E)
+    };
+    fill_circle(buf, stride, w, h, close_x, dot_y + 6, 6, dc, 0xFF);
+    fill_circle(buf, stride, w, h, close_x - gap, dot_y + 6, 6, dm, 0xFF);
+    fill_circle(buf, stride, w, h, close_x - gap * 2, dot_y + 6, 6, dx, 0xFF);
+
+    /* centered title between the left inset and the controls */
+    let tw = title.len() as i64 * 10;
+    let tcx = (x0 + close_x - gap * 2) / 2;
+    draw_text(
+        buf, stride, w, h,
+        tcx - tw / 2,
+        by0 + (WIN_TB - 8) / 2 - 1,
+        title,
+        if focused { TEXT } else { SUB },
+        1, 0xFF,
+    );
+
+    /* focus ring: 1px accent rect around the body */
+    if focused {
+        for x in x0..=x1 {
+            glass_px(buf, stride, w, h, x, by1 - 1, ACCENT, 0x88);
+            glass_px(buf, stride, w, h, x, ry + rh - WIN_SH, ACCENT, 0x38);
+        }
+        for y in by0..ry + rh - WIN_SH {
+            glass_px(buf, stride, w, h, x0, y, ACCENT, 0x30);
+            glass_px(buf, stride, w, h, x1, y, ACCENT, 0x30);
         }
     }
 }
@@ -891,24 +989,54 @@ pub unsafe extern "C" fn hyperde_shell_pump(wm: *mut c_void) {
             dirty = true;
         }
     }
+    /* X11/GNUstep windows share the compositor with the bar: repaint when
+     * the X11 window set changes (open/close/focus/geometry) or the chrome
+     * drawn by render_windows goes stale under later body composites. */
+    {
+        let mut xwins = [PRS_WIN_ZERO; PRS_WIN_MAX];
+        let nx = prs_desktop_windows(xwins.as_mut_ptr(), PRS_WIN_MAX as c_int) as usize;
+        let mut xsig: u64 = (nx as u64).wrapping_add(1);
+        for wi in 0..nx {
+            let w2 = &xwins[wi];
+            let mut hsh: u64 = w2.xid as u64;
+            hsh = hsh.rotate_left(5) ^ ((w2.x as u64) & 0xFFFF);
+            hsh = hsh.rotate_left(5) ^ ((w2.y as u64) & 0xFFFF);
+            hsh = hsh.rotate_left(5) ^ ((w2.w as u64) & 0xFFFF);
+            hsh = hsh.rotate_left(5) ^ ((w2.h as u64) & 0xFFFF);
+            hsh = hsh.rotate_left(5)
+                ^ ((w2.mapped as u64).wrapping_mul(3) + (w2.focused as u64).wrapping_mul(7));
+            xsig = xsig.rotate_left(7) ^ hsh;
+        }
+        if xsig != LAST_XSIG.load(RELAX) {
+            LAST_XSIG.store(xsig, RELAX);
+            dirty = true;
+        }
+    }
 
-    if dirty {
-        let w = FB_W.load(RELAX);
+    let w = FB_W.load(RELAX);
         let h = FB_H.load(RELAX);
         let pitch = fb_get_pitch();
         let row = if pitch > 0 { (pitch as u32) / 4 } else { w };
-        render_bar(fb_get_active_buffer(), row, w, h);
-        render_windows(fb_get_active_buffer(), row, w, h);
-        DRAWS.fetch_add(1, RELAX);
-        LAST_MS.store(now, RELAX);
-        LAST_MIN.store(t.minute, RELAX);
-        LAST_CPU.store(cpu, RELAX);
-        LAST_MEM.store(mem, RELAX);
-        if DRAWS.load(RELAX) % 20 == 0 {
-            kprintf(b"HYPERDE: bar #%u hh=%d mm=%d cpu=%d mem=%llu\0".as_ptr() as *const c_char,
-                DRAWS.load(RELAX) as u32, t.hour, t.minute, cpu, mem);
+        let buf = fb_get_active_buffer();
+        /* Window chrome repaints on every pass: the X11 flush composites
+         * opaque window bodies after the previous chrome draw, so an
+         * always-on chrome pass keeps bands/traffic lights on top. Bodies
+         * are static, so re-blending the glass over them is deterministic
+         * (no bar-style flicker); the bar stays dirty-gated. */
+        render_windows(buf, row, w, h);
+        if dirty {
+            render_bar(buf, row, w, h);
+            DRAWS.fetch_add(1, RELAX);
+            kprintf(b"HYPERDE: render #%u\0".as_ptr() as *const c_char, DRAWS.load(RELAX) as u32);
+            LAST_MS.store(now, RELAX);
+            LAST_MIN.store(t.minute, RELAX);
+            LAST_CPU.store(cpu, RELAX);
+            LAST_MEM.store(mem, RELAX);
+            if DRAWS.load(RELAX) % 20 == 0 {
+                kprintf(b"HYPERDE: bar #%u hh=%d mm=%d cpu=%d mem=%llu\0".as_ptr() as *const c_char,
+                    DRAWS.load(RELAX) as u32, t.hour, t.minute, cpu, mem);
+            }
         }
-    }
 }
 
 /* ───────────────────────── bar hit-test (HyperDE input) ─────────────────────────
@@ -975,6 +1103,32 @@ pub unsafe extern "C" fn hyperde_shell_bar_hit(mx: c_int, my: c_int) -> c_int {
             return (1000 + idx) as c_int;
         }
         px += tw + 8;
+    }
+
+    /* X11/GNUstep pills → 2000 + index (mirrors the render_bar layout) */
+    {
+        let mut xwins = [PRS_WIN_ZERO; PRS_WIN_MAX];
+        let nc = prs_desktop_windows(xwins.as_mut_ptr(), PRS_WIN_MAX as c_int) as usize;
+        let mut i = 0usize;
+        while i < nc {
+            if px > (w as i64) / 2 - 150 {
+                break;
+            }
+            let xwin = xwins[i];
+            i += 1;
+            if xwin.mapped == 0 {
+                continue;
+            }
+            let mut n = 0usize;
+            while n < 9 && xwin.title[n] != 0 {
+                n += 1;
+            }
+            let tw = n as i64 * 10 + 12;
+            if x >= px && x < px + tw {
+                return 2000 + (i - 1) as c_int;
+            }
+            px += tw + 8;
+        }
     }
 
     /* battery + power glyph tiles (far right) */

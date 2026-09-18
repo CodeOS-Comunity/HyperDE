@@ -243,6 +243,88 @@ void prs_kill_client(uint32_t xid) {
     x11_broadcast_event(&ev, -1);
 }
 
+/* ── desktop chrome API (bar pills / window chrome / click routing) ── */
+
+int prs_desktop_windows(prs_desktop_win_t *buf, int max) {
+    if (!buf || max <= 0) return 0;
+    int n = 0;
+    int active = (g_screen) ? xs_active_window(g_screen) : -1;
+    for (int i = 0; i < X11_MAX_WINDOWS && n < max; i++) {
+        x11_window_t *xw = x11_get_window(x11_window_xid(i));
+        if (!xw) continue;
+        if (!xw->mapped) continue;
+        prs_desktop_win_t *d = &buf[n++];
+        d->xid = xw->xid;
+        d->x = (int16_t)xw->x;
+        d->y = (int16_t)xw->y;
+        d->w = (int16_t)xw->width;
+        d->h = (int16_t)xw->height;
+        d->mapped = 1;
+        d->focused = (active >= 0 && prs_compositor_idx(xw->xid) == active) ? 1 : 0;
+        int t = 0;
+        while (xw->title[t] && t < (int)sizeof(d->title) - 1) {
+            d->title[t] = xw->title[t];
+            t++;
+        }
+        d->title[t] = 0;
+    }
+    return n;
+}
+
+uint32_t prs_desktop_focused(void) {
+    if (!g_screen) return 0;
+    int idx = xs_active_window(g_screen);
+    if (idx < 0) return 0;
+    for (int i = 0; i < g_xs_count; i++) {
+        if (g_xs[i].xs_idx == idx) return g_xs[i].xid;
+    }
+    return 0;
+}
+
+void prs_minimize_client(uint32_t xid) {
+    prs_hide_client(xid); /* hide + UNMAP notify, compositor entry kept */
+}
+
+uint32_t prs_window_at(int mx, int my, int *ctl) {
+    if (ctl) *ctl = 0;
+    if (!g_screen) return 0;
+    uint32_t best = 0;
+    int best_z = -1;
+    int best_ctl = 0;
+    for (int i = 0; i < X11_MAX_WINDOWS; i++) {
+        x11_window_t *xw = x11_get_window(x11_window_xid(i));
+        if (!xw || !xw->mapped) continue;
+        int x = xw->x, y = xw->y, w = xw->width, h = xw->height;
+        if (w <= 0 || h <= 0) continue;
+        if (mx < x || mx >= x + w || my < y || my >= y + h) continue;
+        int idx = prs_compositor_idx(xw->xid);
+        int z = 0;
+        xs_window_t *xs = (idx >= 0) ? xs_get_window(g_screen, idx) : 0;
+        if (xs) z = xs->z_index;
+        if (best && z < best_z) continue;
+
+        int ctl2 = -1;
+        int band = y + PRS_CHROME_SH;
+        if (my >= band && my < band + PRS_CHROME_TB) {
+            int dot_y = band + (PRS_CHROME_TB - 12) / 2 + 6;
+            int close_x = x + w - PRS_CHROME_SH - 18;
+            int min_x = close_x - 20;
+            int max_x = close_x - 40;
+            if (my >= dot_y - 9 && my <= dot_y + 9) {
+                if (mx >= max_x - 9 && mx <= max_x + 9) ctl2 = 3;
+                else if (mx >= min_x - 9 && mx <= min_x + 9) ctl2 = 2;
+                else if (mx >= close_x - 9 && mx <= close_x + 9) ctl2 = 1;
+            }
+            if (ctl2 < 0) ctl2 = 0;
+        }
+        best = xw->xid;
+        best_z = z;
+        best_ctl = ctl2;
+    }
+    if (ctl && best) *ctl = best_ctl;
+    return best;
+}
+
 void prs_blit(uint32_t xid, int dst_x, int dst_y, int w, int h, const void *pixels, int stride) {
     int idx = prs_compositor_idx(xid);
     if (idx < 0 || !g_screen || !pixels) return;

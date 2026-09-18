@@ -798,7 +798,10 @@ void xs_init(void) {
     extern uint64_t fb_get_addr_phys(void);
     int pitch = fb_get_pitch();
     if (pitch <= 0) return;
-    int stride = pitch / 4;
+    /* pixelman_image strides are in BYTES (composite32 divides by 4 to get
+     * words); passing words here compressed every composite into the top
+     * quarter of the framebuffer. */
+    int stride = pitch;
     uint32_t *phys = (uint32_t *)fb_get_addr_phys();
     if (!phys) return;
     xs_screen_t *s = xs_screen_create(fb.width, fb.height, phys, stride);

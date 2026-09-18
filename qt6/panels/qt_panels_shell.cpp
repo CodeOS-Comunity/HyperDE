@@ -48,6 +48,7 @@ extern "C" {
 #include "ow_http.h"
 #include "ow_html.h"
 #include "apphost.h"
+#include "penrose_bridge.h"
 #include "block.h"
 #include "io.h"
 #include "updater.h"
@@ -761,6 +762,22 @@ void QtDesktopWidget::paintEvent(QPaintEvent *) {
 }
 
 void QtDesktopWidget::mousePressEvent(QMouseEvent *e) {
+    if (e->button() == Qt::LeftButton) {
+        /* X11/GNUstep chrome clicks (title-band controls on penrose
+         * windows) route here: close / minimize / focus. */
+        int ctl = 0;
+        uint32_t xid = prs_window_at((int)e->position().x(), (int)e->position().y(), &ctl);
+        if (xid) {
+            if (ctl == 1) {
+                prs_kill_client(xid);
+            } else if (ctl == 2) {
+                prs_minimize_client(xid);
+            } else {
+                prs_focus_client(xid);
+            }
+            return;
+        }
+    }
     if (e->button() == Qt::RightButton) {
         QtDesktopManager *mgr = QtDesktopManager::instance();
         if (mgr && mgr->ctxMenu()) {
@@ -798,6 +815,10 @@ void QtDesktopWidget::keyPressEvent(QKeyEvent *e) {
             else if (e->modifiers() & Qt::ShiftModifier) mgr->appSwitcher()->prev();
             else mgr->appSwitcher()->next();
         }
+    } else if (key == Qt::Key_F4 && (e->modifiers() & Qt::AltModifier)) {
+        /* close the focused X11/GNUstep window */
+        uint32_t xid = prs_desktop_focused();
+        if (xid) prs_kill_client(xid);
     } else if (key == Qt::Key_F1) {
         QtDesktopManager *mgr = QtDesktopManager::instance();
         if (mgr && mgr->menubar() && mgr->menubar()->onLauncherToggled)
@@ -1366,6 +1387,14 @@ void QtHyperdeStrip::mousePressEvent(QMouseEvent *e) {
         if (mgr->tilingManager()) mgr->tilingManager()->setWorkspace(code - 920);
     } else if (code >= 900 && code <= 905) {
         mgr->toggleQuickSettings();     /* NET/CPU/MEM/battery/power → quick settings */
+    } else if (code >= 2000) {
+        /* X11/GNUstep task pill → focus that desktop window */
+        prs_desktop_win_t wins[PRS_WIN_MAX];
+        int n = prs_desktop_windows(wins, PRS_WIN_MAX);
+        int idx = code - 2000;
+        if (idx >= 0 && idx < n && wins[idx].mapped) {
+            prs_focus_client(wins[idx].xid);
+        }
     } else if (code >= 1000) {
         mgr->focusHyperdeWindow(code - 1000);
     }

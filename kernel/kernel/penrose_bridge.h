@@ -56,6 +56,39 @@ void prs_blit(uint32_t xid, int dst_x, int dst_y, int w, int h,
 void prs_set_title(uint32_t xid, const char *title);
 int prs_painting(void);
 
+/* ── desktop chrome: X11 windows as first-class desktop citizens ──
+ * The HyperDE shell (bar pills + window chrome) consumes this snapshot;
+ * Qt routes bar-pill clicks, chrome clicks and keyboard shortcuts through
+ * the same API. */
+
+#define PRS_CHROME_SH 6  /* shadow inset, mirrors rust_hyperde WIN_SH */
+#define PRS_CHROME_TB 30 /* title-band height, mirrors rust_hyperde WIN_TB */
+#define PRS_WIN_MAX   32
+
+typedef struct {
+    uint32_t xid;
+    int16_t x, y, w, h;
+    uint8_t mapped;   /* 1 = mapped and composited */
+    uint8_t focused;  /* 1 = active window */
+    char title[40];
+} prs_desktop_win_t;
+
+/* Snapshot mapped X11 windows in creation order (x11 table order). Returns
+ * the number written (≤ max). Order is stable within one frame. */
+int prs_desktop_windows(prs_desktop_win_t *buf, int max);
+
+/* xid of the currently focused X11 window, or 0. */
+uint32_t prs_desktop_focused(void);
+
+/* Title-band hit-test for chrome clicks. Returns the xid whose chrome is
+ * under (mx,my), or 0. On a hit, *ctl is set: 1=close, 2=minimize,
+ * 3=maximize, 0=title band (focus). Body clicks (below the band) also
+ * return the xid with *ctl=-1. */
+uint32_t prs_window_at(int mx, int my, int *ctl);
+
+/* Minimize (hide + UNMAP, compositor entry kept for restore). */
+void prs_minimize_client(uint32_t xid);
+
 void prs_emit_map_request(uint32_t xid);
 void prs_emit_unmap(uint32_t xid);
 void prs_emit_destroy(uint32_t xid);
