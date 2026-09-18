@@ -27,6 +27,15 @@ int waydroid_app_launch(const char *app);
 int waydroid_app_list(char *buf, int max);
 int waydroid_app_installed(const char *app);
 
+/* Desktop async path: activate the session and host the app on a dedicated
+ * scheduler thread, capturing its output for a Qt host window. */
+int waydroid_app_launch_async(const char *app);
+
+/* Bundled app enumeration for the launcher UI (backed by rootfs_android_apps). */
+int waydroid_app_count(void);
+const char *waydroid_app_name(int i);   /* ELF name, e.g. "android-calculator" */
+const char *waydroid_app_label(int i);  /* human label, e.g. "Calculator"      */
+
 /* Shell inside the guest (boot-role demo / future console bridge). */
 int waydroid_shell(void);
 

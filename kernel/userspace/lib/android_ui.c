@@ -102,6 +102,21 @@ au_app_t *au_start(const char *title, int w, int h) {
             app.t0_us = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
     }
 
+    /* Hosted by the async apphost (Qt dock): stdin is a terminal, there is no
+     * WM pump behind fds 3/4, so skip the bridge handshake entirely and run
+     * in console mode from the start. */
+    if (sys_get_info(INFO_APPHOST, NULL, 0) == 1) {
+        for (int i = 0; tag[i]; i++) line[p++] = tag[i];
+        for (int i = 0; title[i] && p < 126; i++) line[p++] = title[i];
+        line[p] = 0;
+        putchar('\n');
+        puts(line);
+        puts("  hosted by apphost - running in console mode");
+        printf("  canvas %dx%d, frame loop active until 'exit' or timeout\n", w, h);
+        app.wm = AU_NO_WM;
+        return &app;
+    }
+
     /* Try to open a window through the WM bridge on fd 3. */
     au_msg_create_win(w, h, title);
     int have_wm = 0;
@@ -121,6 +136,7 @@ au_app_t *au_start(const char *title, int w, int h) {
         return &app;
     }
 
+    printf("android-ui: %s - window bridge unavailable, console mode\n", title);
     app.wm = AU_NO_WM;
     for (int i = 0; tag[i]; i++) line[p++] = tag[i];
     for (int i = 0; title[i] && p < 126; i++) line[p++] = title[i];

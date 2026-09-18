@@ -51,6 +51,7 @@ extern "C" {
 #include "ow_http.h"
 #include "ow_html.h"
 #include "apphost.h"
+#include "waydroid.h"
 #include "block.h"
 #include "io.h"
 #include "updater.h"
@@ -187,7 +188,7 @@ bool QtDesktopManager::init() {
     m_appNames = QStringList{"Terminal","About","Calc","Settings","OpenWeb",
                              "Explorer","Exit","Sys Info","SysMon",
                              "Install CodeOS","LT","NetBeam","Ziggy","Notes","Clock",
-                             "Convert","LaunchApp"};
+                             "Convert","LaunchApp","Android"};
     mouse_set_bounds(sw, sh);
     lvgl_wm_init(&m_wm, sw, sh, 30);
     codeos_font_init();
@@ -262,6 +263,9 @@ void QtDesktopManager::setupApps() {
 
 void QtDesktopManager::launchApp(int index) {
     if (index < 0 || index >= APP_COUNT) return;
+    /* Dock-only pickers never own a window: just open their overlay. */
+    if (index == LAUNCHAPP_INDEX) { toggleLauncher(); return; }
+    if (index == ANDROID_INDEX) { toggleLauncherAndroid(); return; }
     kprintf("NBDEBUG: launchApp idx=%d running=%d\n", index, m_appRunning[index] ? 1 : 0);
     if (m_appRunning[index]) {
         if (m_appWindows[index]) {
@@ -276,29 +280,7 @@ void QtDesktopManager::launchApp(int index) {
     if (m_dock) { m_dock->setRunning(index, true); m_dock->startBounce(index); }
 
     auto registerWin = [this, index](QtAppWindow *w, int ww, int wh) {
-        lvgl_wm_rect_t wr;
-        int wmId = lvgl_wm_create_window(&m_wm, m_appNames.value(index).toUtf8().constData(), ww, wh, &wr);
-        w->setWmId(wmId);
-        w->setGeometry(wr.x, wr.y, ww, wh);
-        w->show();
-        w->activateWindow();
-        w->raise();
-        if (wmId > 0) lvgl_wm_set_focus(&m_wm, wmId);
-        QObject::connect(w, &QtAppWindow::closeRequested, [this, w]() {
-            if (w->wmId() > 0) lvgl_wm_destroy_window(&m_wm, w->wmId());
-            if (m_tilingManager) m_tilingManager->removeWindow(w);
-            for (int i = 0; i < APP_COUNT; i++) {
-                if (m_appWindows[i] == w) {
-                    m_appRunning[i] = 0; m_appWindows[i] = nullptr;
-                    if (m_dock) m_dock->setRunning(i, false);
-                    break;
-                }
-            }
-            /* Keyboard focus returns to the desktop/shell */
-            if (m_desktop) m_desktop->activateWindow();
-        });
-        m_appWindows[index] = w;
-        if (m_autoTiling && m_tilingManager) m_tilingManager->addWindow(w);
+        registerAppWindow(w, index, m_appNames.value(index), ww, wh);
     };
 
     switch (index) {
@@ -328,14 +310,86 @@ void QtDesktopManager::launchApp(int index) {
     case 13: registerWin(new QtNotesWidget(m_desktop), 560, 640); break;
     case 14: registerWin(new QtClockWidget(m_desktop), 560, 640); break;
     case 15: registerWin(new QtConvertWidget(m_desktop), 560, 640); break;
-    case LAUNCHAPP_INDEX: /* dock-only: open the fullscreen app picker */
-        toggleLauncher();
-        break;
     default:
         kprintf("Qt6: App %d '%s' launched (stub)\n", index,
                 m_appNames.value(index).toUtf8().constData());
         break;
     }
+}
+
+void QtDesktopManager::registerAppWindow(QtAppWindow *w, int slot,
+                                         const QString &title, int ww, int wh) {
+    lvgl_wm_rect_t wr;
+    int wmId = lvgl_wm_create_window(&m_wm, title.toUtf8().constData(), ww, wh, &wr);
+    w->setWmId(wmId);
+    w->setGeometry(wr.x, wr.y, ww, wh);
+    w->show();
+    w->activateWindow();
+    w->raise();
+    /* Child windows are not real top-levels here, so activateWindow() does not
+     * move Qt's keyboard focus; do it explicitly so hosted apps receive keys. */
+    w->setFocus();
+    if (wmId > 0) lvgl_wm_set_focus(&m_wm, wmId);
+    QObject::connect(w, &QtAppWindow::closeRequested, [this, w, slot]() {
+        /* Closing the hosted window also asks the guest app to stop. */
+        if (slot == ANDROID_INDEX) apphost_kill();
+        if (w->wmId() > 0) lvgl_wm_destroy_window(&m_wm, w->wmId());
+        if (m_tilingManager) m_tilingManager->removeWindow(w);
+        for (int i = 0; i < APP_COUNT; i++) {
+            if (m_appWindows[i] == w) {
+                m_appRunning[i] = 0; m_appWindows[i] = nullptr;
+                if (m_dock) m_dock->setRunning(i, false);
+                break;
+            }
+        }
+        /* Keyboard focus returns to the desktop/shell */
+        if (m_desktop) m_desktop->activateWindow();
+    });
+    m_appWindows[slot] = w;
+    if (m_autoTiling && m_tilingManager) m_tilingManager->addWindow(w);
+}
+
+QStringList QtDesktopManager::androidAppNames() const {
+    QStringList out;
+    int n = waydroid_app_count();
+    for (int i = 0; i < n; i++) {
+        const char *label = waydroid_app_label(i);
+        out << QString::fromUtf8(label ? label : "Android");
+    }
+    return out;
+}
+
+void QtDesktopManager::launchAndroidApp(int androidIndex) {
+    const char *name = waydroid_app_name(androidIndex);
+    if (!name) return;
+    const char *labelC = waydroid_app_label(androidIndex);
+    QString label = QString::fromUtf8(labelC ? labelC : name);
+
+    /* apphost hosts one app at a time; re-launching just raises the window. */
+    if (apphost_active()) {
+        if (m_appWindows[ANDROID_INDEX]) {
+            m_appWindows[ANDROID_INDEX]->show();
+            m_appWindows[ANDROID_INDEX]->raise();
+            m_appWindows[ANDROID_INDEX]->activateWindow();
+        } else {
+            showToast("An Android app is already running", QColor(0xFF,0x9F,0x0A));
+        }
+        return;
+    }
+    if (m_appRunning[ANDROID_INDEX]) { m_appRunning[ANDROID_INDEX] = 0; m_appWindows[ANDROID_INDEX] = nullptr; }
+
+    showToast("Starting " + label + "...", QColor(0x30,0xD1,0x58));
+    if (waydroid_app_launch_async(name) < 0) {
+        showToast("Could not start " + label, QColor(0xFF,0x45,0x3A));
+        return;
+    }
+    m_appRunning[ANDROID_INDEX] = 1;
+    setFocusedApp(ANDROID_INDEX);
+    if (m_dock) { m_dock->setRunning(ANDROID_INDEX, true); m_dock->startBounce(ANDROID_INDEX); }
+    QString title = "Android - " + label;
+    QtAppHostWidget *w = new QtAppHostWidget(m_desktop);
+    w->setAppTitle(title);
+    registerAppWindow(w, ANDROID_INDEX, title, 720, 480);
 }
 
 extern "C" void *codeos_get_platform_theme(void) {
@@ -622,11 +676,17 @@ void QtDesktopManager::run() {
             toggleLauncher();
             return;
         }
+        /* The Android dock icon opens the Android app picker. */
+        if (i == ANDROID_INDEX) {
+            toggleLauncherAndroid();
+            return;
+        }
         launchApp(i);
         if (i >= 0 && i < m_appNames.size())
             showToast("Opening " + m_appNames[i] + "...", appIconColor(m_appNames[i]));
     };
     m_launcher->onAppSelected = [this](int i) { launchApp(i); };
+    m_launcher->onAndroidSelected = [this](int i) { launchAndroidApp(i); };
 
     m_clockTimer = new QTimer(m_desktop);
     connect(m_clockTimer, &QTimer::timeout, [this]() {
@@ -820,6 +880,12 @@ void QtDesktopManager::toggleLauncher() {
     if (!m_launcher) return;
     if (m_launcher->isVisible()) m_launcher->hideLauncher();
     else m_launcher->showLauncher();
+}
+
+void QtDesktopManager::toggleLauncherAndroid() {
+    if (!m_launcher) return;
+    if (m_launcher->isVisible() && m_launcher->androidMode()) m_launcher->hideLauncher();
+    else m_launcher->showLauncher(true);
 }
 
 void QtDesktopManager::focusHyperdeWindow(int wmIdx) {

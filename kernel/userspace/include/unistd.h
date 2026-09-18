@@ -471,6 +471,7 @@ static inline void *sys_sbrk(int inc) {
 /* GET_INFO commands */
 #define INFO_KERNEL_VERSION 0
 #define INFO_KERNEL_NAME    1
+#define INFO_APPHOST        2 /* returns 1 when the app runs under the async apphost (Qt dock) */
 
 static inline int sys_get_info(int cmd, char *buf, int max_len) {
     int ret;

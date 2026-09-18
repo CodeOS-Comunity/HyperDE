@@ -377,6 +377,9 @@ void QtAppWindow::toggleMaximize() {
 }
 
 void QtAppWindow::mousePressEvent(QMouseEvent *e) {
+    /* Clicking a window gives it keyboard focus (child windows do not get
+     * this for free in the CodeOS compositor). */
+    setFocus(Qt::MouseFocusReason);
     if (m_closeRect.contains(e->pos())) {
         /* Animated close: fade + shrink */
         m_closing = true;
@@ -1089,12 +1092,22 @@ void QtDock::paintEvent(QPaintEvent *) {
     QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
     int count = m_items.size(); if (!count) return;
 
+    /* Fit the dock into the window: with many items the default 56px icons
+     * and 20px slots overflow, which pushes the trailing icons (the app
+     * pickers) off-screen where they cannot be clicked. Tighten the slot
+     * spacing, and only shrink the icons if spacing alone is not enough. */
+    int iconSz = m_iconSize;
     int itemW = m_iconSize + 20;
+    int avail = qMax(1, width() - 16);
+    if (count * itemW > avail) {
+        itemW = qMax(1, avail / count);
+        iconSz = qBound(24, itemW - 10, m_iconSize);
+    }
     int totalW = count * itemW + 16;
     int startX = qMax(8, (width()-totalW)/2);
-    int iconY = (height()-m_iconSize-10)/2;
+    int iconY = qMax(2, (height()-iconSz-10)/2);
 
-    QRect dockBg(startX-8, iconY-8, totalW+16, m_iconSize+30);
+    QRect dockBg(startX-8, iconY-8, totalW+16, iconSz+30);
 
     /* ── Dock multi-layer shadow (3 layers, like devos2) ── */
     p.setPen(Qt::NoPen);
@@ -1146,12 +1159,13 @@ void QtDock::paintEvent(QPaintEvent *) {
 
     for (int i = 0; i < count; i++) {
         int ix = startX+8+i*itemW;
-        m_items[i].rect = QRect(ix, iconY, m_iconSize, m_iconSize);
+        m_items[i].rect = QRect(ix, iconY, iconSz, iconSz);
 
         float t = m_items[i].hoverProgress;
-        int sz = m_iconSize + (int)((m_maxIconSize-m_iconSize)*t);
+        int maxIcon = iconSz + (m_maxIconSize - m_iconSize);
+        int sz = iconSz + (int)((maxIcon-iconSz)*t);
         int bdy = m_items[i].bouncing ? m_items[i].bounceOffset : 0;
-        QRect dr(ix+(m_iconSize-sz)/2, iconY+(m_iconSize-sz)/2+bdy, sz, sz);
+        QRect dr(ix+(iconSz-sz)/2, iconY+(iconSz-sz)/2+bdy, sz, sz);
         m_items[i].magnifiedRect = dr;
 
         /* ── Icon glow ring (when magnified) — COSMIC cyan ── */
@@ -1171,8 +1185,8 @@ void QtDock::paintEvent(QPaintEvent *) {
 
         /* ── Running indicator dot (cyane glow, COSMIC-style) ── */
         if (m_items[i].running) {
-            int dotCx = ix + m_iconSize/2;
-            int dotCy = iconY + m_iconSize + 8;
+            int dotCx = ix + iconSz/2;
+            int dotCy = iconY + iconSz + 8;
             p.setPen(Qt::NoPen);
             p.setBrush(QColor(0x40,0xD9,0xF0, 0x18)); p.drawEllipse(QPoint(dotCx,dotCy), 5, 5);
             p.setBrush(QColor(0x40,0xD9,0xF0, 0x40)); p.drawEllipse(QPoint(dotCx,dotCy), 4, 4);
@@ -1186,7 +1200,7 @@ void QtDock::paintEvent(QPaintEvent *) {
             QFont bf = font(); bf.setPointSize(8); p.setFont(bf);
             QFontMetrics bfm(bf);
             int bw = bfm.horizontalAdvance(bs)+8;
-            QRect br(ix+m_iconSize-bw/2, iconY-4, bw, 14);
+            QRect br(ix+iconSz-bw/2, iconY-4, bw, 14);
             p.setBrush(c_red); p.drawRoundedRect(br, 7, 7);
             p.setPen(Qt::white); p.drawText(br, Qt::AlignCenter, bs);
         }
@@ -1197,7 +1211,7 @@ void QtDock::paintEvent(QPaintEvent *) {
             QFontMetrics fm2(lf);
             QString label = m_items[i].name;
             int lw = fm2.horizontalAdvance(label);
-            QRect labelRect(ix+(m_iconSize-lw)/2, iconY-20, lw+8, 16);
+            QRect labelRect(ix+(iconSz-lw)/2, iconY-20, lw+8, 16);
             int labelAlpha = (int)((t-0.5f)*2.0f*220);
             p.setPen(Qt::NoPen);
             p.setBrush(QColor(20,20,22,labelAlpha));
@@ -1365,11 +1379,18 @@ QtLauncherOverlay::QtLauncherOverlay(QWidget *parent) : QWidget(parent) {
     setMouseTracking(true);
 }
 
-void QtLauncherOverlay::showLauncher() {
-    m_open = true; m_searchText.clear(); m_currentPage = 0; m_hoveredIndex = -1; m_selIndex = 0;
+void QtLauncherOverlay::showLauncher(bool androidMode) {
+    m_open = true; m_androidMode = androidMode;
+    m_searchText.clear(); m_currentPage = 0; m_hoveredIndex = -1; m_selIndex = 0;
     QtDesktopManager *mgr = QtDesktopManager::instance();
-    if (mgr) m_appNames = mgr->appNames();
-    if (m_appNames.isEmpty()) m_appNames = QStringList{"Terminal","About","Calc","DevStore","Settings","OpenWeb","Explorer","Exit","Sys Info","SysMon","Firewall","Install CodeOS","Steam","DOS Mode","LT","NetBeam","Ziggy","Notes","Clock","Convert"};
+    if (mgr) {
+        m_appNames = mgr->appNames();
+        m_androidLabels = mgr->androidAppNames();
+    }
+    if (m_appNames.isEmpty()) m_appNames = QStringList{"Terminal","About","Calc","Settings","OpenWeb",
+                                                       "Explorer","Exit","Sys Info","SysMon",
+                                                       "Install CodeOS","LT","NetBeam","Ziggy","Notes","Clock",
+                                                       "Convert","LaunchApp","Android"};
     updateGrid(); rebuildItemRects(); show(); raise(); setFocus(); update();
 }
 
@@ -1379,17 +1400,21 @@ void QtLauncherOverlay::updateGrid() {
     m_filteredNames.clear();
     /* COSMIC-style fuzzy search: prefix ranks first, then substring matches.
      * LaunchApp is a dock-only picker — keep it out of the grid so selecting
-     * it can't toggle/close the overlay. */
+     * it can't toggle/close the overlay. Android mode lists the guest apps. */
+    const QStringList &src = m_androidMode ? m_androidLabels : m_appNames;
     QList<QPair<QString,int>> tagged;
     if (m_searchText.isEmpty()) {
-        for (int i = 0; i < m_appNames.size(); i++)
-            if (i != LAUNCHAPP_INDEX) tagged.append({m_appNames[i], i});
+        for (int i = 0; i < src.size(); i++) {
+            if (!m_androidMode && i == LAUNCHAPP_INDEX) continue;
+            tagged.append({src[i], i});
+        }
     } else {
         QString q = m_searchText.toLower();
-        for (int i = 0; i < m_appNames.size(); i++) {
-            QString n = m_appNames[i];
+        for (int i = 0; i < src.size(); i++) {
+            if (!m_androidMode && i == LAUNCHAPP_INDEX) continue;
+            QString n = src[i];
             QString l = n.toLower();
-            if (l.contains(q) && i != LAUNCHAPP_INDEX) tagged.append({n, i});
+            if (l.contains(q)) tagged.append({n, i});
         }
         /* stable sort: prefix matches float to the front */
         std::stable_sort(tagged.begin(), tagged.end(), [&](const QPair<QString,int>&a, const QPair<QString,int>&b){
@@ -1492,7 +1517,8 @@ void QtLauncherOverlay::paintEvent(QPaintEvent *) {
     QFont f = font(); f.setPointSize(15); p.setFont(f);
     p.setPen(m_searchText.isEmpty() ? c_subtext : c_text);
     p.drawText(QRect(sr.x()+42, sr.y(), sr.width()-52, 48), Qt::AlignVCenter|Qt::AlignLeft,
-               m_searchText.isEmpty() ? "Search apps..." : m_searchText);
+               m_searchText.isEmpty() ? (m_androidMode ? "Search Android apps..." : "Search apps...")
+                                      : m_searchText);
 
     /* ── App grid ── */
     int cols = 5, cellW = 140, cellH = 120;
@@ -1565,15 +1591,22 @@ void QtLauncherOverlay::paintEvent(QPaintEvent *) {
     }
 }
 
+void QtLauncherOverlay::activateName(const QString &name) {
+    if (m_androidMode) {
+        int ai = m_androidLabels.indexOf(name);
+        if (ai >= 0) { hideLauncher(); if (onAndroidSelected) onAndroidSelected(ai); }
+    } else {
+        int realIdx = m_appNames.indexOf(name);
+        if (realIdx >= 0) { hideLauncher(); if (onAppSelected) onAppSelected(realIdx); }
+    }
+}
+
 void QtLauncherOverlay::mousePressEvent(QMouseEvent *e) {
     if (e->button()!=Qt::LeftButton) return;
     for (int i = 0; i < m_itemRects.size(); i++) {
         if (m_itemRects[i].contains(e->pos())) {
             int appIdx = m_currentPage*m_itemsPerPage+i;
-            if (appIdx < m_filteredNames.size()) {
-                int realIdx = m_appNames.indexOf(m_filteredNames[appIdx]);
-                if (realIdx >= 0) { hideLauncher(); if (onAppSelected) onAppSelected(realIdx); }
-            }
+            if (appIdx < m_filteredNames.size()) activateName(m_filteredNames[appIdx]);
             return;
         }
     }
@@ -1599,8 +1632,7 @@ void QtLauncherOverlay::keyPressEvent(QKeyEvent *e) {
         int vi = visibleIndex();
         if (vi >= 0 && vi < visible) {
             QString selName = m_filteredNames[vi];
-            int realIdx = m_appNames.indexOf(selName);
-            if (realIdx >= 0) { hideLauncher(); if (onAppSelected) onAppSelected(realIdx); }
+            activateName(selName);
         }
         return;
     }

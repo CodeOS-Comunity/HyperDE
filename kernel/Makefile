@@ -245,7 +245,7 @@ QT6_PANELS_SRC = $(wildcard $(QT6_PANELS_DIR)/*.cpp) \
 # The stamp carries source-change information back to $(TARGET); the bare
 # object rule below only fires when an object file is missing entirely.
 QT6_PANELS_STAMP = $(QT6_PANELS_DIR)/.built.stamp
-QT6_PANELS_SRC := $(shell find $(QT6_DIR) ../pkgs/core/panels \
+QT6_PANELS_SRC := $(shell find $(QT6_DIR) ../pkgs/core/panels ../pkgs/extra/qt_apps \
 	\( -name '*.cpp' -o -name '*.c' -o -name '*.h' \) 2>/dev/null) \
 	$(QT6_PANELS_DIR)/Makefile
 

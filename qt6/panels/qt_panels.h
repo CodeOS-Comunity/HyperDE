@@ -290,10 +290,13 @@ class QtLauncherOverlay : public QWidget {
     Q_OBJECT
 public:
     explicit QtLauncherOverlay(QWidget *parent = nullptr);
-    void showLauncher();
+    void showLauncher(bool androidMode = false);
     void hideLauncher();
     bool isOpen() const { return m_open; }
+    bool androidMode() const { return m_androidMode; }
     std::function<void(int)> onAppSelected;
+    /* Android mode: index into waydroid_app_name()/waydroid_app_label(). */
+    std::function<void(int)> onAndroidSelected;
     /* called by the desktop manager's global filter while the launcher has
        keyboard ownership (window apps keep focus, keys are forwarded here) */
     void forwardKey(QKeyEvent *e) { keyPressEvent(e); }
@@ -308,11 +311,14 @@ private:
     void updateGrid();
     void showPage(int page);
     void rebuildItemRects();
+    void activateName(const QString &name);
     int startOfPage(int page, int perPage, int total) const;
     int visibleIndex() const { return m_currentPage*m_itemsPerPage + (m_hoveredIndex >= 0 ? m_hoveredIndex : m_selIndex); }
     bool m_open = false;
+    bool m_androidMode = false;
     QList<QRect> m_itemRects;
     QStringList m_appNames;
+    QStringList m_androidLabels;
     QStringList m_filteredNames;
     QString m_searchText;
     int m_hoveredIndex = -1;
@@ -977,6 +983,7 @@ public:
     CodeOSTerminal *terminal()           { return m_terminal; }
     lvgl_wm_t *wm()                      { return &m_wm; }
     QStringList appNames() const         { return m_appNames; }
+    QStringList androidAppNames() const;  /* labels for the Android picker */
     bool appRunning(int i) const         { return i >= 0 && i < APP_COUNT && m_appRunning[i]; }
     QtAppWindow **appWindows()           { return m_appWindows; }
 
@@ -988,11 +995,13 @@ public:
     QtDesktopManager();
     void setFocusedApp(int idx);
     void launchApp(int index);
+    void launchAndroidApp(int androidIndex);
     void setupApps();
     void toggleMissionControl();
 
     /* HyperDE chrome interaction */
     void toggleLauncher();
+    void toggleLauncherAndroid();
     void focusHyperdeWindow(int wmIdx);
     void syncHyperdeChrome(bool active);
     QtHyperdeStrip *hyperdeStrip() { return m_hyperdeStrip; }
@@ -1008,6 +1017,7 @@ public:
 
 private:
     static QtDesktopManager *s_instance;
+    void registerAppWindow(QtAppWindow *w, int slot, const QString &title, int ww, int wh);
     bool m_running = false;
     int m_focusedApp = -1;
 

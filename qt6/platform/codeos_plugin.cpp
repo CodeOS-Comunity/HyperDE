@@ -450,6 +450,17 @@ void CodeOSIntegration::pollInput() {
                 case 0x94: qt_key = Qt::Key_F10; break;  // KEY_F10
                 case 0x95: qt_key = Qt::Key_F11; break;  // KEY_F11
                 case 0x96: qt_key = Qt::Key_F12; break;  // KEY_F12
+                case 0x80: qt_key = Qt::Key_Up; break;       // KEY_UP
+                case 0x81: qt_key = Qt::Key_Down; break;     // KEY_DOWN
+                case 0x82: qt_key = Qt::Key_Left; break;     // KEY_LEFT
+                case 0x83: qt_key = Qt::Key_Right; break;    // KEY_RIGHT
+                case 0x84: qt_key = Qt::Key_Home; break;     // KEY_HOME
+                case 0x85: qt_key = Qt::Key_End; break;      // KEY_END
+                case 0x86: qt_key = Qt::Key_Delete; break;   // KEY_DEL
+                case 0x87: qt_key = Qt::Key_PageUp; break;   // KEY_PGUP
+                case 0x88: qt_key = Qt::Key_PageDown; break; // KEY_PGDN
+                case 0x89: qt_key = Qt::Key_Insert; break;   // KEY_INS
+                case 0x8A: qt_key = Qt::Key_Meta; break;     // KEY_SUPER
                 default:
                     if (ev.key >= 32 && ev.key <= 126)
                         qt_key = (Qt::Key)ev.key; // ASCII printable
@@ -477,9 +488,16 @@ void CodeOSIntegration::pollInput() {
                     if (w && w->handle() && w->isVisible()) { ktarget = w; break; }
                 }
             }
+            /* Qt wants the produced text separately from the key code; the
+             * kernel delivers printable ASCII directly, so pass it through
+             * (except for shortcut chords, which must not produce text). */
+            QString kkey_text;
+            if (!(mods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))
+                && qt_key >= 0x20 && qt_key <= 0x7e)
+                kkey_text = QChar((ushort)qt_key);
             QWindowSystemInterface::handleKeyEvent(
                 ktarget, 0, QEvent::KeyPress, qt_key, mods,
-                QString());
+                kkey_text);
             kprintf("POST key=%d mods=%d tgt=%p\n", qt_key, (int)mods, (void*)ktarget);
         } else if (ev.type == 2) {
             static int last_buttons = 0;

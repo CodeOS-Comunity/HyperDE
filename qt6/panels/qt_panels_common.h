@@ -11,12 +11,17 @@
 /* ── Layout constants ── */
 #define MENUBAR_H   28
 #define DOCK_H      80
-#define APP_COUNT   17
+#define APP_COUNT   18
 
 /* "LaunchApp" — the dock's app-picker icon. It lives in m_appNames at this
  * index (so the dock and launcher grid pick it up) but is excluded from the
  * launcher grid and opens the fullscreen picker instead of a window. */
 #define LAUNCHAPP_INDEX  16
+
+/* "Android" — the dock's Android app-picker icon. It opens the launcher
+ * overlay in Android mode; selecting an app hosts it asynchronously through
+ * the appvm container + apphost (see waydroid_app_launch_async). */
+#define ANDROID_INDEX    17
 
 #define TOAST_W         340
 #define TOAST_H         44

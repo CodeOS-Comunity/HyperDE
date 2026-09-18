@@ -421,10 +421,23 @@ static int64_t sys_read(int fd, uint64_t user_buf, uint64_t count) {
         if (apphost_active()) {
             uint8_t buf[256];
             uint64_t n = count > sizeof(buf) ? sizeof(buf) : count;
-            int r = apphost_read_in(buf, (int)n);
-            if (r > 0 && copy_to_user(user_buf, buf, r) < 0)
-                return -1;
-            return r;
+            if (n == 0) return 0;
+            /* Terminal semantics: block until at least one byte is available
+             * (or the app is being torn down), matching serial_readchar() on
+             * the synchronous path. Returning 0 mid-line would make console
+             * REPLs discard the partial line. */
+            for (;;) {
+                int r = apphost_read_in(buf, (int)n);
+                if (r > 0) {
+                    if (copy_to_user(user_buf, buf, r) < 0) return -1;
+                    return r;
+                }
+                if (!apphost_active()) return 0;
+                /* After a teardown request, report EOF rather than blocking:
+                 * the host is closing the app and will not inject more input. */
+                if (apphost_killed()) return 0;
+                sched_sleep_ms(5);
+            }
         }
         uint8_t buf[256];
         int max_read = count > sizeof(buf) ? sizeof(buf) : count;
@@ -439,7 +452,7 @@ static int64_t sys_read(int fd, uint64_t user_buf, uint64_t count) {
             return -1;
         return i;
     }
-    if (fd >= 0 && fd < MAX_FDS && fd_table[fd].used) {
+    if (fd_verify(fd)) {
         int available = fd_table[fd].len - fd_table[fd].pos;
         if (available <= 0) return 0;
         if ((int64_t)count > available) count = (uint64_t)available;
@@ -2263,6 +2276,8 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
             }
             return len;
         }
+        case 2: /* apphost context: 1 when stdin is the async apphost terminal */
+            return apphost_active() ? 1 : 0;
         default:
             return -1;
         }

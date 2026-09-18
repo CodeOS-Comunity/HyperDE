@@ -76,8 +76,11 @@ QtAppHostWidget::QtAppHostWidget(QWidget *parent) : QtAppWindow("Hosted App", pa
         uint8_t buf[4096]; int n = apphost_drain(buf, sizeof(buf));
         if (n > 0) {
             for (int i = 0; i < n; i++) {
-                if (buf[i]=='\n'||buf[i]=='\r') { m_lines.append(m_lineBuf); m_lineBuf.clear(); if (m_lines.size()>500) m_lines.removeFirst(); }
-                else if (buf[i]==0xFF) { m_lines.append("<<APP EXIT>>"); m_lineBuf.clear(); }
+                if (buf[i]=='\n'||buf[i]=='\r') {
+                    if (!m_lineBuf.isEmpty()) kprintf("[host] %s\n", m_lineBuf.toUtf8().constData());
+                    m_lines.append(m_lineBuf); m_lineBuf.clear(); if (m_lines.size()>500) m_lines.removeFirst();
+                }
+                else if (buf[i]==0xFF) { kprintf("[host] <<APP EXIT>>\n"); m_lines.append("<<APP EXIT>>"); m_lineBuf.clear(); }
                 else m_lineBuf += QChar((ushort)buf[i]);
             }
             update();
@@ -91,7 +94,13 @@ void QtAppHostWidget::keyPressEvent(QKeyEvent *e) {
     int key = e->key();
     if (key==Qt::Key_Backspace) { uint8_t b='\b'; apphost_write_in(&b,1); }
     else if (key==Qt::Key_Return||key==Qt::Key_Enter) { uint8_t b='\n'; apphost_write_in(&b,1); }
-    else if (key>=Qt::Key_Space && key<=Qt::Key_AsciiTilde) { uint8_t b=(uint8_t)e->text()[0].toLatin1(); apphost_write_in(&b,1); }
+    else if (key>=Qt::Key_Space && key<=Qt::Key_AsciiTilde) {
+        /* The CodeOS platform reports printable keys by ASCII key code and may
+         * leave text() empty; fall back to the key code so typing still works. */
+        QChar ch = e->text().isEmpty() ? QChar((ushort)key) : e->text()[0];
+        uint8_t b = (uint8_t)ch.toLatin1();
+        if (b) apphost_write_in(&b,1);
+    }
     else if (key==Qt::Key_Escape) apphost_kill();
 }
 

@@ -26,6 +26,10 @@
 #include "container.h"
 #include "rootfs.h"
 #include "user_wm.h"
+#include "apphost.h"
+#include "sched.h"
+#include "serial.h"
+#include "timer.h"
 
 /* App name list lives in rootfs.c (rootfs_android_apps): the seed owns the
  * android-stock image and installs /bin/android-* into /system/app there.
@@ -176,6 +180,54 @@ int waydroid_app_launch(const char *app) {
     return container_exec(id, path, 0, 0, 0);
 }
 
+/* Desktop/async launch: activate the session (docker-style, without blocking
+ * on an entrypoint boot) and host the app on a dedicated scheduler thread so
+ * the Qt compositor stays live. Output is captured through the apphost rings
+ * and shown in a QtAppHostWidget. */
+int waydroid_app_launch_async(const char *app) {
+    int id;
+    char path[FS_PATH_MAX];
+    container_t *c;
+
+    if (!app || !app[0]) {
+        kprintf("waydroid: app launch: missing app name\n");
+        return -1;
+    }
+    if (!waydroid_app_installed(app)) {
+        kprintf("waydroid: app '%s' is not installed\n", app);
+        return -1;
+    }
+
+    id = wd_ensure_container();
+    if (id < 0) return -1;
+    c = container_get(id);
+    if (!c) return -1;
+    if (c->state == CONTAINER_CREATED) {
+        if (container_mark_running(id) < 0) return -1;
+    } else if (c->state == CONTAINER_PAUSED) {
+        container_set_state(id, CONTAINER_RUNNING);
+    } else if (c->state != CONTAINER_RUNNING) {
+        kprintf("waydroid: container '%s' is not runnable\n", c->name);
+        return -1;
+    }
+
+    wd_app_path(path, sizeof(path), app);
+    kprintf("waydroid: hosting '%s' asynchronously\n", app);
+    return apphost_launch_container(id, path);
+}
+
+int waydroid_app_count(void) { return ROOTFS_ANDROID_APP_COUNT; }
+
+const char *waydroid_app_name(int i) {
+    if (i < 0 || i >= ROOTFS_ANDROID_APP_COUNT) return 0;
+    return rootfs_android_apps[i];
+}
+
+const char *waydroid_app_label(int i) {
+    const char *name = waydroid_app_name(i);
+    return name ? wd_label_for(name) : 0;
+}
+
 int waydroid_app_list(char *buf, int max) {
     int n = 0;
     for (int i = 0; i < ROOTFS_ANDROID_APP_COUNT; i++) {
@@ -238,11 +290,46 @@ int waydroid_status(char *buf, int max) {
 
 /* ─── shell command ─── */
 
+/* Console mirror of the desktop's async host path: drain the apphost stdout
+ * ring to the console and forward typed input to the guest's stdin. Used by
+ * `waydroid app launch <app> --async` so the headless build can exercise the
+ * same code the Qt dock uses. */
+static void wd_pump_hosted(int max_iters) {
+    uint64_t t0 = timer_get_milliseconds();
+    int i = 0;
+    /* max_iters <= 0 runs the session until the app exits. */
+    for (; (max_iters <= 0 || i < max_iters) && apphost_active(); i++) {
+        uint8_t buf[512];
+        int n;
+        while ((n = apphost_drain(buf, sizeof(buf))) > 0) {
+            for (int k = 0; k < n; k++) kprintf("%c", buf[k]);
+        }
+        while (serial_available()) {
+            int c = serial_readchar();
+            if (c < 0) break;
+            uint8_t b = (uint8_t)c;
+            apphost_write_in(&b, 1);
+        }
+        sched_sleep_ms(20);
+    }
+    uint8_t buf[512];
+    int n;
+    while ((n = apphost_drain(buf, sizeof(buf))) > 0) {
+        for (int k = 0; k < n; k++) kprintf("%c", buf[k]);
+    }
+    if (apphost_exited())
+        kprintf("waydroid: hosted app exited with status %d (%lums)\n",
+                apphost_exit_status(), (unsigned long)(timer_get_milliseconds() - t0));
+    else
+        kprintf("waydroid: hosted app still running (%lums)\n",
+                (unsigned long)(timer_get_milliseconds() - t0));
+}
+
 static void wd_usage(void) {
     kprintf("usage: waydroid init\n");
     kprintf("       waydroid session start|stop|pause|resume\n");
     kprintf("       waydroid app list\n");
-    kprintf("       waydroid app launch <app>\n");
+    kprintf("       waydroid app launch <app> [--async]\n");
     kprintf("       waydroid shell\n");
     kprintf("       waydroid status\n");
 }
@@ -265,10 +352,17 @@ void cmd_waydroid(int argc, char **argv) {
             waydroid_app_list(buf, sizeof(buf));
             kprintf("%s", buf);
         } else if (strcmp(argv[2], "launch") == 0 && argc >= 4) {
-            if (waydroid_app_launch(argv[3]) < 0)
+            int async = (argc >= 5 && strcmp(argv[4], "--async") == 0);
+            if (async) {
+                if (waydroid_app_launch_async(argv[3]) < 0)
+                    kprintf("waydroid: app launch failed\n");
+                else
+                    wd_pump_hosted(0);   /* run until the hosted app exits */
+            } else if (waydroid_app_launch(argv[3]) < 0) {
                 kprintf("waydroid: app launch failed\n");
+            }
         } else {
-            kprintf("waydroid: usage: waydroid app list|launch <app>\n");
+            kprintf("waydroid: usage: waydroid app list|launch <app> [--async]\n");
         }
     } else if (strcmp(argv[1], "shell") == 0) {
         waydroid_shell();
