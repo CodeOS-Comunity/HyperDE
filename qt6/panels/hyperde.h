@@ -17,6 +17,7 @@ int  hyperde_shell_bar_hit(int x, int y);
 void hyperde_shell_set_workspace(int cur, int num);
 int  hyperde_shell_cpu(void);
 int  hyperde_shell_mem_mb(void);
+int  hyperde_shell_mem_total_mb(void);
 
 #ifdef __cplusplus
 }

@@ -199,6 +199,7 @@ extern "C" {
     fn timer_get_milliseconds() -> u64;
     fn sched_busy_ticks() -> u64;
     fn pmm_count_used() -> u64;
+    fn pmm_total_pages() -> u64;
     fn lvgl_wm_window_count(wm: *const c_void) -> c_int;
     fn lvgl_wm_window_at(wm: *const c_void, idx: c_int) -> *const LvglWindow;
     fn kprintf(fmt: *const c_char, ...);
@@ -829,6 +830,13 @@ pub unsafe extern "C" fn hyperde_shell_cpu() -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn hyperde_shell_mem_mb() -> c_int {
     mem_mb() as c_int
+}
+
+/* Total physical RAM the PMM manages, in MiB.  The Qt quick-settings meter
+ * uses this so it scales to the machine instead of assuming a fixed size. */
+#[no_mangle]
+pub unsafe extern "C" fn hyperde_shell_mem_total_mb() -> c_int {
+    (pmm_total_pages() * 4096 / 1024 / 1024) as c_int
 }
 
 #[no_mangle]

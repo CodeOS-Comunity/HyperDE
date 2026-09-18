@@ -1762,7 +1762,7 @@ void QtQuickSettings::paintEvent(QPaintEvent *) {
     if (!m_open) return;
     m_cpu = hyperde_shell_cpu();
     m_mem = hyperde_shell_mem_mb();
-    m_memTotal = 4096;
+    m_memTotal = hyperde_shell_mem_total_mb();
 
     QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
 
@@ -1835,8 +1835,10 @@ void QtQuickSettings::paintEvent(QPaintEvent *) {
     p.drawText(QRect(16, yy, 120, 20), Qt::AlignLeft|Qt::AlignVCenter, "MEMORY");
     p.setPen(c_text);
     int memPct = m_memTotal > 0 ? qBound(0, int(100.0*m_mem/m_memTotal), 100) : 0;
-    p.drawText(QRect(width()-140, yy, 124, 20), Qt::AlignRight|Qt::AlignVCenter,
-               QString("%1 MB").arg(m_mem));
+    QString memTxt = m_memTotal >= 1024
+        ? QString("%1 / %2 GB").arg(m_mem/1024.0, 0, 'f', 1).arg(m_memTotal/1024.0, 0, 'f', 1)
+        : QString("%1 / %2 MB").arg(m_mem).arg(m_memTotal);
+    p.drawText(QRect(width()-164, yy, 148, 20), Qt::AlignRight|Qt::AlignVCenter, memTxt);
     QRect memR(16, yy+24, width()-32, 8);
     p.setPen(Qt::NoPen); p.setBrush(QColor(255,255,255,18));
     p.drawRoundedRect(memR, 4, 4);
