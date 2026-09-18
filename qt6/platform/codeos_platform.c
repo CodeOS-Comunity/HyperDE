@@ -344,36 +344,42 @@ int codeos_platform_blit(int x, int y, int w, int h, const uint32_t *pixels, int
     for (int row = 0; row < h; row++) {
         int py = y + row;
         if (py < 0 || py >= fb_h) continue;
-        int src_row = row;
         uint32_t *dst = &fb[py * pitch + x];
-        const uint32_t *src = &pixels[src_row * stride_pixels];
+        const uint32_t *src = &pixels[row * stride_pixels];
         int copy_w = w;
         if (x < 0) { src += (-x); dst += (-x); copy_w += x; }
         if (x + copy_w > fb_w) copy_w = fb_w - x;
-        if (copy_w > 0) memcpy(dst, src, copy_w * 4);
-    }
-    if (x == 0 && y == 0 && w >= 1280 && h >= 800) {
-        static int full_checked = 0;
-        if (!full_checked) {
-            full_checked = 1;
-            kprintf("FB-CHECK src(0,0)=(%d,%d,%d) fb(0,0)=(%d,%d,%d)\n",
-                    pixels[0] & 0xFF, (pixels[0] >> 8) & 0xFF, (pixels[0] >> 16) & 0xFF,
-                    fb[0] & 0xFF, (fb[0] >> 8) & 0xFF, (fb[0] >> 16) & 0xFF);
-            kprintf("FB-CHECK src(640,178)=(%d,%d,%d) fb=(%d,%d,%d)\n",
-                    pixels[178 * stride_pixels + 640] & 0xFF,
-                    (pixels[178 * stride_pixels + 640] >> 8) & 0xFF,
-                    (pixels[178 * stride_pixels + 640] >> 16) & 0xFF,
-                    fb[178 * pitch + 640] & 0xFF,
-                    (fb[178 * pitch + 640] >> 8) & 0xFF,
-                    (fb[178 * pitch + 640] >> 16) & 0xFF);
-            kprintf("FB-CHECK src(640,600)=(%d,%d,%d) fb=(%d,%d,%d) addr=%p\n",
-                    pixels[600 * stride_pixels + 640] & 0xFF,
-                    (pixels[600 * stride_pixels + 640] >> 8) & 0xFF,
-                    (pixels[600 * stride_pixels + 640] >> 16) & 0xFF,
-                    fb[600 * pitch + 640] & 0xFF,
-                    (fb[600 * pitch + 640] >> 8) & 0xFF,
-                    (fb[600 * pitch + 640] >> 16) & 0xFF,
-                    (void *)fb);
+        if (copy_w <= 0) continue;
+
+        /* Qt backing stores are Format_ARGB32_Premultiplied (byte0=B,1=G,2=R,
+         * 3=A). Opaque runs are a plain copy; translucent pixels must be
+         * composited over whatever is already in the framebuffer, otherwise
+         * glass panels and opacity animations show up dark and visibly
+         * "breathe" against the wallpaper (raw memcpy discards the alpha). */
+        int has_alpha = 0;
+        for (int i = 0; i < copy_w; i++) {
+            if (((src[i] >> 24) & 0xFF) < 250) { has_alpha = 1; break; }
+        }
+        if (!has_alpha) {
+            memcpy(dst, src, (size_t)copy_w * 4);
+            continue;
+        }
+        for (int i = 0; i < copy_w; i++) {
+            uint32_t p = src[i];
+            uint32_t a = (p >> 24) & 0xFF;
+            if (a >= 250) { dst[i] = p; continue; }
+            if (a == 0) { continue; }  /* fully transparent: leave fb as-is */
+            uint32_t sr = (p >> 16) & 0xFF;
+            uint32_t sg = (p >> 8) & 0xFF;
+            uint32_t sb = p & 0xFF;
+            uint32_t dr = (dst[i] >> 16) & 0xFF;
+            uint32_t dg = (dst[i] >> 8) & 0xFF;
+            uint32_t db = dst[i] & 0xFF;
+            uint32_t ia = 255 - a;
+            uint32_t or_ = sr + (dr * ia) / 255;
+            uint32_t og = sg + (dg * ia) / 255;
+            uint32_t ob = sb + (db * ia) / 255;
+            dst[i] = (or_ << 16) | (og << 8) | ob;
         }
     }
     return 0;

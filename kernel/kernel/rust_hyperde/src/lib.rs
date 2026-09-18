@@ -862,8 +862,11 @@ pub unsafe extern "C" fn hyperde_shell_pump(wm: *mut c_void) {
     let cpu = cpu_percent();
     let mem = mem_mb();
 
-    let mut dirty = now.abs_diff(LAST_MS.load(RELAX)) >= 200
-        || t.minute != LAST_MIN.load(RELAX)
+    /* Repaint only when something user-visible changed. An unconditional
+     * tick-based repaint re-blends the translucent glass over whatever Qt
+     * is writing underneath, which makes the top bar's pixels wobble every
+     * ~200ms (perceived as flashing near the panel). */
+    let mut dirty = t.minute != LAST_MIN.load(RELAX)
         || cpu.abs_diff(LAST_CPU.load(RELAX) as c_int) >= 5
         || mem != LAST_MEM.load(RELAX);
     if INIT_DONE.load(RELAX) == 1 {
