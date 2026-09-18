@@ -73,7 +73,7 @@ void ow_core_render_active(void) {
     tabs = ow_get_tabs();
     if (tabs && index >= 0 && index < ow_get_tab_count() &&
         tabs[index].content_len > 0 && tabs[index].content_len < OW_CONTENT_MAX)
-        render_html(tabs[index].content, tabs[index].content_len);
+        ow_render_rs(tabs[index].content, tabs[index].content_len);
 }
 
 openweb_tab_t *ow_core_tabs(void) { return g_initialized ? ow_get_tabs() : 0; }
@@ -81,3 +81,32 @@ int ow_core_tab_count(void) { return g_initialized ? ow_get_tab_count() : 0; }
 int ow_core_active_tab(void) { return g_initialized ? ow_get_tab_active() : -1; }
 int ow_core_used_tab_count(void) { return g_initialized ? ow_tab_used_count() : 0; }
 int ow_core_load_progress(void) { return g_initialized ? ow_get_load_progress() : 0; }
+
+/* Render the active tab with the Rust renderer (ow_render_rs) and print the
+ * resulting grid to the console. Headless verification aid. */
+void ow_core_dump_active(void) {
+    int index, r, k;
+    openweb_tab_t *tabs;
+    ow_core_init();
+    index = ow_get_tab_active();
+    tabs = ow_get_tabs();
+    if (!tabs || index < 0 || index >= ow_get_tab_count() ||
+        tabs[index].content_len <= 0) {
+        kprintf("ow: no page loaded\n");
+        return;
+    }
+    ow_render_rs(tabs[index].content, tabs[index].content_len);
+    kprintf("ow: url='%s' title='%s' lines=%d links=%d images=%d forms=%d fields=%d\n",
+            tabs[index].url, ow_page_title, ow_txt_lines, ow_link_cnt,
+            ow_image_cnt, ow_form_cnt, ow_field_cnt);
+    for (r = 0; r < ow_txt_lines && r < OW_TXT_LINES; r++)
+        kprintf("|%s|\n", ow_txt[r]);
+    for (k = 0; k < ow_link_cnt; k++)
+        kprintf("ow: link[%d] line=%d sc=%d ec=%d url='%s'\n",
+                k, ow_links[k].line, ow_links[k].sc, ow_links[k].ec, ow_links[k].url);
+    for (k = 0; k < ow_field_cnt; k++)
+        kprintf("ow: field[%d] type=%d name='%s' value='%s' line=%d col=%d w=%d checked=%d\n",
+                k, ow_form_fields[k].type, ow_form_fields[k].name, ow_form_fields[k].value,
+                ow_form_fields[k].line, ow_form_fields[k].col, ow_form_fields[k].width,
+                ow_form_fields[k].checked);
+}

@@ -251,7 +251,7 @@ static const char *builtins[] = {
         "sleep", "repeat", "seq", "script", "yes", "true", "false",
     "wc", "head", "hexdump", "calc",         "date", "rev", "run", "sort",
     "cp", "mv", "shutdown", "df", "du", "id", "su", "sudo", "root", "container", "appvm", "kill", "ps",
-    "waydroid", "login", "passwd", "useradd", "userdel", "users",
+    "waydroid", "ow", "login", "passwd", "useradd", "userdel", "users",
     "chmod", "chown", "tail", "grep", "find", "ln", "dd",
     "source", "type", "less", "time", "tee", "tr", "nl", "fold",
     "basename", "dirname", "tty", "logname", "nproc", "realpath",
@@ -2561,6 +2561,27 @@ static void cmd_appvm(int argc, char **argv) {
     }
 }
 
+/* ── ow: OpenWeb render smoke test ──
+ * `ow render <url>` navigates the Rust HTTP backend, renders the page with the
+ * Rust HTML renderer (ow_render_rs) and dumps the text grid to the console.
+ *
+ * The real implementations live in openweb_core.o (Qt/OpenWeb phase, linked
+ * only into the final kernel target), so declare weak fallbacks here: the
+ * stage-1 link picks these up, the final link overrides them with the strong
+ * definitions. */
+__attribute__((weak)) void ow_core_navigate(const char *text) { (void)text; }
+__attribute__((weak)) void ow_core_dump_active(void) {}
+
+static void cmd_ow(int argc, char **argv) {
+    if (argc >= 3 && strcmp(argv[1], "render") == 0) {
+        kprintf("ow: fetching '%s'...\n", argv[2]);
+        ow_core_navigate(argv[2]);
+        ow_core_dump_active();
+        return;
+    }
+    kprintf("usage: ow render <url>   (fetch + render + dump the page grid)\n");
+}
+
 #include "pe_loader.h"
 
 static void cmd_wine(int argc, char **argv) {
@@ -3827,6 +3848,7 @@ static void run_builtin(int argc, char **argv) {
     else if (strcmp(cmd, "container") == 0) cmd_container(argc, argv);
     else if (strcmp(cmd, "appvm") == 0) cmd_appvm(argc, argv);
     else if (strcmp(cmd, "waydroid") == 0) cmd_waydroid(argc, argv);
+    else if (strcmp(cmd, "ow") == 0) cmd_ow(argc, argv);
     else if (strcmp(cmd, "login") == 0) cmd_login(argc, argv);
     else if (strcmp(cmd, "passwd") == 0) cmd_passwd(argc, argv);
     else if (strcmp(cmd, "useradd") == 0) cmd_useradd(argc, argv);

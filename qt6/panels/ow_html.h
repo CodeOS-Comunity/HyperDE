@@ -88,7 +88,15 @@ int  ow_field_at(int line, int col);
 /* Build "name=value&..." (URL-encoded, skips unchecked + buttons). */
 int  ow_form_build_query(const ow_form_t *f, char *out, int out_max);
 
-void render_html(const char *html, int len);
+/* HTML rendering is implemented in Rust (kernel/kernel/rust_ow/src/ow_render.rs)
+ * and fills all of the globals above. */
+void ow_render_rs(const char *html, int len);
+
+/* Edit-cache bridge used by the Rust renderer around each laid-out control
+ * (identity-checked restore/store of user edits; C-owned cache). */
+void ow_fv_restore(ow_form_field_t *f, int fi);
+void ow_fv_store(const ow_form_field_t *f, int fi);
+
 /* Fetch an image over plain HTTP into buf (headers stripped). Returns bytes. */
 int ow_image_download(const char *url, void *buf, int max_len);
 

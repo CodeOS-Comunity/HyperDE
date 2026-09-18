@@ -13,6 +13,9 @@ typedef struct {
     int error;
     int can_go_back;
     int can_go_forward;
+    /* Must mirror the trailing field of Rust `OpenwebTab` (ow_http.rs) so the
+     * C and Rust `sizeof` (array stride) agree. */
+    int _redirect_depth;
 } openweb_tab_t;
 
 /* ── Rust backend API (ow_http.rs → libow_http.a) ── */

@@ -19,4 +19,9 @@ int  ow_core_active_tab(void);
 int  ow_core_used_tab_count(void);
 int  ow_core_load_progress(void);
 
+/* Headless diagnostics: render the active tab with the Rust renderer and dump
+ * the resulting text grid / links / title to the console. Used by the kernel
+ * shell `ow render <url>` command. */
+void ow_core_dump_active(void);
+
 #endif

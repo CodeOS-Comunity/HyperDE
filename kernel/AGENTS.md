@@ -15,7 +15,7 @@ Guidance for humans and coding agents working on this tree.
 - Kernel-injected packages use a `pkgs/core/<name>/src/KERN` marker. The
   graphics stack lives in `pkgs/core/graphics/` and is compiled into the
   kernel automatically.
-- OpenWeb’s HTTP backend is Rust: `kernel/kernel/rust_ow/` (needs `cargo`).
+- OpenWeb’s HTTP backend and HTML renderer are Rust: `kernel/kernel/rust_ow/` (needs `cargo`); the renderer writes the C-owned grid globals in `qt6/panels/ow_html.{c,h}` (see the OpenWeb section below).
 
 ## Build
 ```sh
@@ -48,3 +48,11 @@ Host needs `x86_64-elf-gcc`, `xorriso`, `python3`, `cargo`, and QEMU for run tar
 - **User-window bridge** (`kernel/kernel/user_wm.{c,h}`): maps WM-protocol messages on fd 3 (commands) / fd 4 (events) to LVGL desktop windows, with fds/events wired in `syscall.c` (READ/PWRITE hooks, `UW_FD_EVT=4`/`UW_FD_CMD=3`) and input/tick routed from the compositor thread in `lvgl_port.c`. `container_exec` calls `user_wm_setup/release` for `/system/app/*` paths; `main.c` arms the bridge via `user_wm_init()` when a framebuffer is present.
 - When the bridge/desktop is absent (headless boot), apps self-report and fall back to console mode — this keeps `make -C kernel codeos-1-kernel.iso` + headless QEMU (`-vga none -nographic`) verification deterministic: `waydroid app launch android-calculator` boots the app and its console REPL evaluates expressions.
 - Note: kernel `snprintf` has no `-` flag (right-align with the widest width instead) and `fs_resolve()` returns the node index — test with `>= 0`, never `== 0`.
+
+## OpenWeb (litebrowser-style lightweight browser)
+- Two Rust halves, one C contract: the **HTTP/tab backend** (`kernel/kernel/rust_ow/src/lib.rs`, built into `libow_http.a`) owns the tab array and fetching; the **HTML renderer** (`kernel/kernel/rust_ow/src/ow_render.rs`) is a direct Rust port of the old C `render_html()` and is exported as `ow_render_rs(const char *html, int len)`.
+- The renderer writes the **C-owned output globals** declared in `qt6/panels/ow_html.h` (`ow_txt[512][120]`, `ow_txt_lines`, `ow_line_info`, `ow_links`, `ow_images`, `ow_forms`, `ow_form_fields`, `ow_page_title`, `ow_need_render`, …) through `extern static`, so the Qt frontend (`qt_panels_openweb.cpp`) and `openweb_core.c` are unchanged. `qt6/panels/ow_html.c` keeps only those globals, the parallel image workers + `ow_image_download()`, and the exported form API (`ow_field_set_value/toggle/at`, `ow_form_build_query`).
+- The persistent **form edit cache** stays in C (identity keys name+type+form-action) because it is re-applied on every re-render; Rust calls the thin `ow_fv_restore(ow_form_field_t*, int)` / `ow_fv_store(const ow_form_field_t*, int)` bridges instead of duplicating the logic.
+- `openweb_tab_t` in `pkgs/core/panels/src/ow_http.h` must mirror the trailing `_redirect_depth` field of the Rust `OpenwebTab` struct — without it the C and Rust `sizeof` differ and tab indexing past 0 is broken.
+- Headless verification: `ow render <url>` (shell builtin in `shell.c`, weak-linked to `ow_core_navigate()` + `ow_core_dump_active()` in `openweb_core.c`) fetches the page with the Rust backend, renders with `ow_render_rs`, and dumps the text grid + links + fields to the console. Host a page with `python3 -m http.server 8000 --bind 0.0.0.0`, then boot the ISO with `-vga none -nographic -monitor none -netdev user,id=net0 -device e1000,netdev=net0` and run `ow render http://10.0.2.2:8000/test.html`.
+- The full CSS/`litehtml` layout engine is **not** wired up yet (the upstream `litebrowser-linux` `litehtml` submodule is empty); rendering is the text-grid engine above. `libow_http.a` has no Make prerequisites if the rule is left bare — `kernel/Makefile`'s `RUST_LIB` rule depends on `kernel/kernel/rust_ow/src/*.rs` + `Cargo.toml`.
