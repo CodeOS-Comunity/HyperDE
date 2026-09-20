@@ -5,6 +5,10 @@ use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicPtr, Ordering};
 
 mod wayland;
+mod config;
+mod keybind;
+mod launcher;
+mod notify;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -240,21 +244,39 @@ extern "C" {
 
 /* ───────────────────────── palette (XRGB8888) ─────────────────────────
  * COSMIC-style: default cyan accent, glass chrome rendered high-key so
- * the bar reads as a single translucent slab (rounded, floating). */
+ * the bar reads as a single translucent slab (rounded, floating).
+ * Defaults are overridden by conf.lua at boot via palette_load_config(). */
 
-const ACCENT: u32 = 0x0040D9F0; /* COSMIC cyan */
-const GREEN: u32 = 0x0030D158;
-const TEXT: u32 = 0x00F5F5F7;
-const SUB: u32 = 0x0095A0AA;
-const GLASS_TOP: u32 = 0x00242428;
-const GLASS_BOT: u32 = 0x0017171B;
-const GLASS_ALPHA: u32 = 0xC8;
-
+struct Palette {
+    accent: u32, green: u32, text: u32, sub: u32,
+    glass_top: u32, glass_bot: u32, glass_alpha: u32,
+    focused_border: u32, normal_border: u32, border_width: u32, bar_h: u32,
+}
+static mut PAL: Palette = Palette {
+    accent: 0x0040D9F0, green: 0x0030D158, text: 0x00F5F5F7, sub: 0x0095A0AA,
+    glass_top: 0x00242428, glass_bot: 0x0017171B, glass_alpha: 0xC8,
+    focused_border: 0x0040D9F0, normal_border: 0x003c3836, border_width: 2, bar_h: 28,
+};
 const CLOSE_DOT: u32 = 0x00FF5F57;
 const MIN_DOT: u32 = 0x00FFBD2E;
 const MAX_DOT: u32 = 0x0028C840;
 
-const BAR_H: u32 = 28;
+/// Load palette from conf.lua config into the mutable palette
+unsafe fn palette_load_config() {
+    let cfg = config::config();
+    PAL.accent = cfg.accent;
+    PAL.focused_border = cfg.focused_border;
+    PAL.normal_border = cfg.normal_border;
+    PAL.glass_top = cfg.glass_top;
+    PAL.glass_bot = cfg.glass_bottom;
+    PAL.glass_alpha = cfg.glass_alpha;
+    PAL.border_width = cfg.border_width;
+    PAL.bar_h = cfg.panel_height;
+}
+
+/// Read-only palette access
+#[inline(always)]
+unsafe fn pal() -> &'static Palette { &*(&raw const PAL) }
 
 /* ───────────────────────── state ─────────────────────────
  * Everything shared between the Qt panels thread (pump / set_active) and the
@@ -487,23 +509,23 @@ const MONTHS: [[u8; 3]; 12] = [
 ];
 
 unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
-    let mid = (BAR_H / 2) as i64;
+    let mid = (pal().bar_h / 2) as i64;
 
     /* liquid glass base (vertical gradient, blended over underlying) */
-    for y in 0..BAR_H as i64 {
-        let t = (y as u32 * 255) / BAR_H;
-        let top_r = (GLASS_TOP >> 16) & 0xFF;
-        let top_g = (GLASS_TOP >> 8) & 0xFF;
-        let top_b = GLASS_TOP & 0xFF;
-        let bot_r = (GLASS_BOT >> 16) & 0xFF;
-        let bot_g = (GLASS_BOT >> 8) & 0xFF;
-        let bot_b = GLASS_BOT & 0xFF;
+    for y in 0..pal().bar_h as i64 {
+        let t = (y as u32 * 255) / pal().bar_h;
+        let top_r = (pal().glass_top >> 16) & 0xFF;
+        let top_g = (pal().glass_top >> 8) & 0xFF;
+        let top_b = pal().glass_top & 0xFF;
+        let bot_r = (pal().glass_bot >> 16) & 0xFF;
+        let bot_g = (pal().glass_bot >> 8) & 0xFF;
+        let bot_b = pal().glass_bot & 0xFF;
         let r = (top_r * (255 - t) + bot_r * t) / 255;
         let g2 = (top_g * (255 - t) + bot_g * t) / 255;
         let b = (top_b * (255 - t) + bot_b * t) / 255;
         let gcol = (r << 16) | (g2 << 8) | b;
         for x in 0..w as i64 {
-            glass_px(buf, stride, w, h, x, y, gcol, GLASS_ALPHA);
+            glass_px(buf, stride, w, h, x, y, gcol, pal().glass_alpha);
         }
     }
 
@@ -511,8 +533,8 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
     for x in 0..w as i64 {
         glass_px(buf, stride, w, h, x, 0, 0x00FFFFFF, 0x22);
         glass_px(buf, stride, w, h, x, 1, 0x00FFFFFF, 0x12);
-        glass_px(buf, stride, w, h, x, BAR_H as i64 - 2, ACCENT, 0x46);
-        glass_px(buf, stride, w, h, x, BAR_H as i64 - 1, 0x00000000, 0x34);
+        glass_px(buf, stride, w, h, x, pal().bar_h as i64 - 2, pal().accent, 0x46);
+        glass_px(buf, stride, w, h, x, pal().bar_h as i64 - 1, 0x00000000, 0x34);
     }
 
     /* app-grid launcher button (COSMIC "Applications" activity) */
@@ -521,7 +543,7 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
     let lc = lx + 18;
     for gy in -1i64..=1 {
         for gx in -1i64..=1 {
-            fill_circle(buf, stride, w, h, lc + gx * 6, mid + gy * 6, 2, ACCENT, 0xFF);
+            fill_circle(buf, stride, w, h, lc + gx * 6, mid + gy * 6, 2, pal().accent, 0xFF);
         }
     }
     /* divider */
@@ -539,7 +561,7 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
         let wx = ws_start + i * 22;
         let wy = mid - wbar_h / 2;
         if i == ws_cur {
-            round_rect(buf, stride, w, h, wx, wy - 1, wx + wbar_w, wy + wbar_h + 1, 3, ACCENT, 0xFF);
+            round_rect(buf, stride, w, h, wx, wy - 1, wx + wbar_w, wy + wbar_h + 1, 3, pal().accent, 0xFF);
         } else {
             round_rect(buf, stride, w, h, wx, wy, wx + wbar_w, wy + wbar_h, 2, 0x00FFFFFF, 0x26);
         }
@@ -574,8 +596,8 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
         }
         let tw = n as i64 * 10 + 12;
         round_rect(buf, stride, w, h, x, mid - 9, x + tw, mid + 9, 9, 0x00FFFFFF, 0x16);
-        fill_circle(buf, stride, w, h, x + 7, mid, 3, if focused { GREEN } else { SUB }, 0xA0);
-        draw_text(buf, stride, w, h, x + 14, mid - 4, &s[..n], if focused { TEXT } else { SUB }, 1, 0xFF);
+        fill_circle(buf, stride, w, h, x + 7, mid, 3, if focused { pal().green } else { pal().sub }, 0xA0);
+        draw_text(buf, stride, w, h, x + 14, mid - 4, &s[..n], if focused { pal().text } else { pal().sub }, 1, 0xFF);
         x += tw + 8;
     }
 
@@ -600,8 +622,8 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
             }
             let tw = n as i64 * 10 + 12;
             round_rect(buf, stride, w, h, x, mid - 9, x + tw, mid + 9, 9, 0x00FFFFFF, 0x16);
-            fill_circle(buf, stride, w, h, x + 7, mid, 3, if xwin.focused != 0 { GREEN } else { SUB }, 0xA0);
-            draw_text(buf, stride, w, h, x + 14, mid - 4, &xwin.title[..n], if xwin.focused != 0 { TEXT } else { SUB }, 1, 0xFF);
+            fill_circle(buf, stride, w, h, x + 7, mid, 3, if xwin.focused != 0 { pal().green } else { pal().sub }, 0xA0);
+            draw_text(buf, stride, w, h, x + 14, mid - 4, &xwin.title[..n], if xwin.focused != 0 { pal().text } else { pal().sub }, 1, 0xFF);
             x += tw + 8;
         }
     }
@@ -615,24 +637,24 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
     round_rect(buf, stride, w, h, pow_x, ry, pow_x + 28, ry + rh, 9, 0x00FFFFFF, 0x12);
     round_rect(buf, stride, w, h, bat_x, ry, bat_x + 28, ry + rh, 9, 0x00FFFFFF, 0x12);
     /* power: concentric ring + stem */
-    fill_circle(buf, stride, w, h, pow_x + 14, mid, 4, SUB, 0xC0);
-    fill_circle(buf, stride, w, h, pow_x + 14, mid, 2, GLASS_BOT, 0xF0);
+    fill_circle(buf, stride, w, h, pow_x + 14, mid, 4, pal().sub, 0xC0);
+    fill_circle(buf, stride, w, h, pow_x + 14, mid, 2, pal().glass_bot, 0xF0);
     for dy in -6i64..-2 {
-        px(buf, stride, w, h, pow_x + 14, mid + dy, SUB);
+        px(buf, stride, w, h, pow_x + 14, mid + dy, pal().sub);
     }
     /* battery: outline + 70% fill + nub */
     for dy in -3i64..=3 {
-        px(buf, stride, w, h, bat_x + 16, mid + dy, SUB);
-        px(buf, stride, w, h, bat_x + 22, mid + dy, SUB);
+        px(buf, stride, w, h, bat_x + 16, mid + dy, pal().sub);
+        px(buf, stride, w, h, bat_x + 22, mid + dy, pal().sub);
     }
     for dx in 0i64..8 {
         for dy in -4i64..=4 {
-            let c = if dx < 6 { ACCENT } else { SUB };
+            let c = if dx < 6 { pal().accent } else { pal().sub };
             px(buf, stride, w, h, bat_x + 16 + dx, mid + dy, c);
         }
     }
     for dy in -1i64..=1 {
-        px(buf, stride, w, h, bat_x + 24, mid + dy, SUB);
+        px(buf, stride, w, h, bat_x + 24, mid + dy, pal().sub);
     }
 
     /* ── applet tiles: NET, CPU, MEM ── */
@@ -640,22 +662,22 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
     let cpu_x = w as i64 - 178;
     let mem_x = w as i64 - 238;
     round_rect(buf, stride, w, h, net_x, ry, net_x + 40, ry + rh, 9, 0x00FFFFFF, 0x12);
-    fill_circle(buf, stride, w, h, net_x + 10, mid, 3, GREEN, 0xA0);
-    draw_text(buf, stride, w, h, net_x + 19, mid - 4, b"net", SUB, 1, 0xFF);
+    fill_circle(buf, stride, w, h, net_x + 10, mid, 3, pal().green, 0xA0);
+    draw_text(buf, stride, w, h, net_x + 19, mid - 4, b"net", pal().sub, 1, 0xFF);
 
     let cpu = cpu_percent();
     round_rect(buf, stride, w, h, cpu_x, ry, cpu_x + 52, ry + rh, 9, 0x00FFFFFF, 0x12);
-    draw_text(buf, stride, w, h, cpu_x + 8, mid - 4, b"cpu", SUB, 1, 0xFF);
+    draw_text(buf, stride, w, h, cpu_x + 8, mid - 4, b"cpu", pal().sub, 1, 0xFF);
     let mut cbuf = [0u8; 16];
     let cl = fmt_int(cpu, 0, &mut cbuf);
-    draw_text(buf, stride, w, h, cpu_x + 40 - cl as i64 * 10, mid - 4, &cbuf[..cl], TEXT, 1, 0xFF);
+    draw_text(buf, stride, w, h, cpu_x + 40 - cl as i64 * 10, mid - 4, &cbuf[..cl], pal().text, 1, 0xFF);
 
     let mem = mem_mb() as c_int;
     round_rect(buf, stride, w, h, mem_x, ry, mem_x + 52, ry + rh, 9, 0x00FFFFFF, 0x12);
-    draw_text(buf, stride, w, h, mem_x + 8, mid - 4, b"mem", SUB, 1, 0xFF);
+    draw_text(buf, stride, w, h, mem_x + 8, mid - 4, b"mem", pal().sub, 1, 0xFF);
     let mut mbuf = [0u8; 16];
     let ml = fmt_int(mem, 0, &mut mbuf);
-    draw_text(buf, stride, w, h, mem_x + 40 - ml as i64 * 10, mid - 4, &mbuf[..ml], TEXT, 1, 0xFF);
+    draw_text(buf, stride, w, h, mem_x + 40 - ml as i64 * 10, mid - 4, &mbuf[..ml], pal().text, 1, 0xFF);
 
     /* ── centered clock: small date + scale-2 time ── */
     let now = rtc_now();
@@ -682,11 +704,11 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
     let dw = dn as i64 * 10;
     let tww = ((hl + 1 + ml2) as i64) * 20;
     let start = (w as i64) / 2 - (dw + 8 + tww) / 2;
-    draw_text(buf, stride, w, h, start, mid - 4, &dbuf[..dn], SUB, 1, 0xFF);
+    draw_text(buf, stride, w, h, start, mid - 4, &dbuf[..dn], pal().sub, 1, 0xFF);
     let tx = start + dw + 8;
-    draw_text(buf, stride, w, h, tx, mid - 8, &hbuf[..hl], TEXT, 2, 0xFF);
-    draw_text(buf, stride, w, h, tx + hl as i64 * 20, mid - 8, b":", TEXT, 2, 0xFF);
-    draw_text(buf, stride, w, h, tx + (hl as i64 + 1) * 20, mid - 8, &m2[..ml2], TEXT, 2, 0xFF);
+    draw_text(buf, stride, w, h, tx, mid - 8, &hbuf[..hl], pal().text, 2, 0xFF);
+    draw_text(buf, stride, w, h, tx + hl as i64 * 20, mid - 8, b":", pal().text, 2, 0xFF);
+    draw_text(buf, stride, w, h, tx + (hl as i64 + 1) * 20, mid - 8, &m2[..ml2], pal().text, 2, 0xFF);
 }
 
 /* ───────────────────── window compositor ─────────────────────
@@ -723,7 +745,7 @@ unsafe fn render_windows(buf: *mut u32, stride: u32, w: u32, h: u32) {
             continue;
         }
         /* entirely above the bar — nothing to compose */
-        if ry + rh <= BAR_H as i64 {
+        if ry + rh <= pal().bar_h as i64 {
             continue;
         }
         let mut s = [0u8; 40];
@@ -761,7 +783,7 @@ unsafe fn render_windows(buf: *mut u32, stride: u32, w: u32, h: u32) {
             continue;
         }
         /* entirely above the bar — nothing to compose */
-        if ry + rh <= BAR_H as i64 {
+        if ry + rh <= pal().bar_h as i64 {
             continue;
         }
         let mut n = 0usize;
@@ -792,16 +814,16 @@ unsafe fn draw_window_chrome(
     let x0 = rx + WIN_SH;
     let x1 = rx + rw - WIN_SH - 1;
     for y in by0..by1 {
-        if y < BAR_H as i64 {
+        if y < pal().bar_h as i64 {
             continue;
         }
         let t = ((y - by0) * 255 / WIN_TB) as u32;
-        let top_r = (GLASS_TOP >> 16) & 0xFF;
-        let top_g = (GLASS_TOP >> 8) & 0xFF;
-        let top_b = GLASS_TOP & 0xFF;
-        let bot_r = (GLASS_BOT >> 16) & 0xFF;
-        let bot_g = (GLASS_BOT >> 8) & 0xFF;
-        let bot_b = GLASS_BOT & 0xFF;
+        let top_r = (pal().glass_top >> 16) & 0xFF;
+        let top_g = (pal().glass_top >> 8) & 0xFF;
+        let top_b = pal().glass_top & 0xFF;
+        let bot_r = (pal().glass_bot >> 16) & 0xFF;
+        let bot_g = (pal().glass_bot >> 8) & 0xFF;
+        let bot_b = pal().glass_bot & 0xFF;
         let r = (top_r * (255 - t) + bot_r * t) / 255;
         let g = (top_g * (255 - t) + bot_g * t) / 255;
         let b = (top_b * (255 - t) + bot_b * t) / 255;
@@ -824,7 +846,7 @@ unsafe fn draw_window_chrome(
         glass_px(buf, stride, w, h, x, by0, 0x00FFFFFF, 0x22);
         glass_px(buf, stride, w, h, x, by0 + 1, 0x00FFFFFF, 0x12);
         if focused {
-            glass_px(buf, stride, w, h, x, by1 - 1, ACCENT, 0x88);
+            glass_px(buf, stride, w, h, x, by1 - 1, pal().accent, 0x88);
         } else {
             glass_px(buf, stride, w, h, x, by1 - 1, 0x00000000, 0x33);
         }
@@ -851,19 +873,19 @@ unsafe fn draw_window_chrome(
         tcx - tw / 2,
         by0 + (WIN_TB - 8) / 2 - 1,
         title,
-        if focused { TEXT } else { SUB },
+        if focused { pal().text } else { pal().sub },
         1, 0xFF,
     );
 
     /* focus ring: 1px accent rect around the body */
     if focused {
         for x in x0..=x1 {
-            glass_px(buf, stride, w, h, x, by1 - 1, ACCENT, 0x88);
-            glass_px(buf, stride, w, h, x, ry + rh - WIN_SH, ACCENT, 0x38);
+            glass_px(buf, stride, w, h, x, by1 - 1, pal().accent, 0x88);
+            glass_px(buf, stride, w, h, x, ry + rh - WIN_SH, pal().accent, 0x38);
         }
         for y in by0..ry + rh - WIN_SH {
-            glass_px(buf, stride, w, h, x0, y, ACCENT, 0x30);
-            glass_px(buf, stride, w, h, x1, y, ACCENT, 0x30);
+            glass_px(buf, stride, w, h, x0, y, pal().accent, 0x30);
+            glass_px(buf, stride, w, h, x1, y, pal().accent, 0x30);
         }
     }
 }
@@ -896,6 +918,10 @@ pub unsafe extern "C" fn hyperde_shell_init() {
     kprintf(b"HYPERDE: compositor active=%d\0".as_ptr() as *const c_char, ACTIVE.load(RELAX));
 
     wayland::hyperde_wl_selftest();
+
+    /* load conf.lua config into mutable palette */
+    config::config_parse(include_str!("../../../../userspace/hyperde/conf.lua").as_bytes());
+    palette_load_config();
 }
 
 #[no_mangle]
@@ -1050,7 +1076,7 @@ pub unsafe extern "C" fn hyperde_shell_pump(wm: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hyperde_shell_bar_hit(mx: c_int, my: c_int) -> c_int {
-    if my < 0 || my >= BAR_H as c_int {
+    if my < 0 || my >= pal().bar_h as c_int {
         return 0;
     }
     let w = FB_W.load(RELAX) as i64;

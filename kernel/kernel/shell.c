@@ -7,6 +7,7 @@
 #include "pkg.h"
 #include "sched.h"
 #include "net.h"
+#include "xora.h"
 #include "https_certs.h"
 #include "icmp.h"
 #include "arp.h"
@@ -3930,6 +3931,8 @@ static void run_builtin(int argc, char **argv) {
     else if (strcmp(cmd, "update-disable") == 0) cmd_update_disable(argc, argv);
     else if (strcmp(cmd, "wine") == 0) cmd_wine(argc, argv);
     else if (strcmp(cmd, "wineserver") == 0) cmd_wineserver(argc, argv);
+    else if (strcmp(cmd, "xora") == 0) cmd_xora(argc, argv);
+    else if (strcmp(cmd, "nettest") == 0) cmd_nettest(argc, argv);
     else kprintf("%s: command not found\n", cmd);
 }
 
@@ -4064,11 +4067,41 @@ void https_boot_test(void) {
 
 void shell_selftest(void) {
     int ri, pi;
+
+    /* ── Test 1: Package search ── */
     int pkg_ok = (pkg_find_in_repos("sysfetch", &ri, &pi) == 0);
     kprintf("SHELLTEST: sysfetch package in repo=%d (repo idx %d)\n", pkg_ok, ri);
     if (pkg_ok) {
-    kprintf("SHELLTEST: running sysfetch...\n");
-    cmd_sysfetch();
+        kprintf("SHELLTEST: running sysfetch...\n");
+        cmd_sysfetch();
     }
+
+    /* ── Test 2: fetch -S (local install) ── */
+    kprintf("SHELLTEST: testing fetch -S...\n");
+    char *fargv[] = {"fetch", "-S", "tree", NULL};
+    cmd_fetch(3, fargv);
+    extern int pkg_installed_count(void);
+    kprintf("SHELLTEST: installed packages: %d\n", pkg_installed_count());
+
+    /* ── Test 3: fetch -L (list) ── */
+    kprintf("SHELLTEST: testing fetch -L...\n");
+    char *largv[] = {"fetch", "-L", NULL};
+    cmd_fetch(2, largv);
+
+    /* ── Test 4: fetch -Ss (search) ── */
+    kprintf("SHELLTEST: testing fetch -Ss...\n");
+    char *sargv[] = {"fetch", "-Ss", "curl", NULL};
+    cmd_fetch(3, sargv);
+
+    /* ── Test 5: xora list ── */
+    kprintf("SHELLTEST: testing xora list...\n");
+    char *xargv[] = {"xora", "list", NULL};
+    cmd_xora(2, xargv);
+
+    /* ── Test 6: nettest ── */
+    kprintf("SHELLTEST: testing nettest...\n");
+    char *nargv[] = {"nettest", NULL};
+    cmd_nettest(1, nargv);
+
     kprintf("SHELLTEST: done\n");
 }

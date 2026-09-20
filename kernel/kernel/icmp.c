@@ -12,9 +12,52 @@ static icmp_stats_t stats;
 static spinlock_t icmp_lock = SPINLOCK_INIT;
 static uint16_t next_id;
 
+/* ── ICMP reply queue ──
+ * When netd's ip_recv() path dispatches an ICMP ECHO_REPLY through
+ * icmp_recv(), we enqueue it here so icmp_echo_seq() can match it
+ * without racing nic_recv() against the netd thread.  The queue is
+ * small (16 entries) and drained by icmp_reply_dequeue(). */
+static icmp_reply_entry_t reply_queue[ICMP_REPLY_QUEUE_SIZE];
+static int rq_head, rq_tail;
+static spinlock_t rq_lock = SPINLOCK_INIT;
+
+void icmp_reply_queue_init(void) {
+    rq_head = rq_tail = 0;
+    memset(reply_queue, 0, sizeof(reply_queue));
+}
+
+static void reply_enqueue(uint16_t id, uint16_t seq, uint32_t src_ip) {
+    spin_lock(&rq_lock);
+    int next = (rq_head + 1) % ICMP_REPLY_QUEUE_SIZE;
+    if (next == rq_tail) { spin_unlock(&rq_lock); return; } /* full — drop */
+    reply_queue[rq_head].id = id;
+    reply_queue[rq_head].seq = seq;
+    reply_queue[rq_head].src_ip = src_ip;
+    reply_queue[rq_head].timestamp = timer_get_milliseconds();
+    rq_head = next;
+    spin_unlock(&rq_lock);
+}
+
+int icmp_reply_dequeue(uint16_t id, uint16_t seq, uint32_t *src_out) {
+    spin_lock(&rq_lock);
+    while (rq_tail != rq_head) {
+        icmp_reply_entry_t *e = &reply_queue[rq_tail];
+        if (e->id == id && e->seq == seq) {
+            if (src_out) *src_out = e->src_ip;
+            rq_tail = (rq_tail + 1) % ICMP_REPLY_QUEUE_SIZE;
+            spin_unlock(&rq_lock);
+            return 0;
+        }
+        rq_tail = (rq_tail + 1) % ICMP_REPLY_QUEUE_SIZE;
+    }
+    spin_unlock(&rq_lock);
+    return -1;
+}
+
 int icmp_init(void) {
     memset(&stats, 0, sizeof(stats));
     next_id = 1;
+    icmp_reply_queue_init();
     kprintf("icmp: init\n");
     return 0;
 }
@@ -40,22 +83,19 @@ int icmp_echo(uint32_t dst, int timeout_ms) {
 int icmp_echo_seq(uint32_t dst, uint16_t seq, int timeout_ms) {
     uint16_t id = next_id++;
     uint64_t start = timer_get_milliseconds();
+    /* Drain any stale replies for this id BEFORE sending to avoid
+     * the reply from this echo being caught by a stale drain. */
+    { uint32_t dummy; while (icmp_reply_dequeue(id, seq, &dummy) == 0) {} }
     icmp_send_echo(dst, id, seq);
+
     while ((int)(timer_get_milliseconds() - start) < timeout_ms) {
         sched_sleep_ms(1);
-        uint8_t b[2048];
-        int l;
-        while ((l = nic_recv(b, sizeof(b))) > 0) {
-            if (l < (int)(sizeof(eth_frame_t) + sizeof(ip_packet_t) + sizeof(icmp_echo_t))) continue;
-            const eth_frame_t *ethf = (const eth_frame_t *)b;
-            if (__builtin_bswap16(ethf->type) != ETH_P_IP) continue;
-            const ip_packet_t *ip = (const ip_packet_t *)(b + sizeof(eth_frame_t));
-            if (ip->protocol != IP_PROTO_ICMP || ip->src != dst) continue;
-            int ihl = (ip->ver_ihl & 0x0F) * 4;
-            const icmp_echo_t *ic = (const icmp_echo_t *)((uint8_t *)ip + ihl);
-            if (ic->type == ICMP_ECHO_REPLY && __builtin_bswap16(ic->id) == id && __builtin_bswap16(ic->seq) == seq) {
-                return (int)(timer_get_milliseconds() - start);
-            }
+        /* Check the reply queue — icmp_recv() enqueues ECHO_REPLY
+         * packets here via the netd/ip_recv path, avoiding the race
+         * where netd drains nic_recv() before we can read it. */
+        uint32_t src;
+        if (icmp_reply_dequeue(id, seq, &src) == 0) {
+            return (int)(timer_get_milliseconds() - start);
         }
     }
     spin_lock(&icmp_lock);
@@ -91,6 +131,9 @@ void icmp_recv(const uint8_t *pkt, int len, uint32_t src_ip) {
         spin_lock(&icmp_lock);
         stats.rx_echo_reply++;
         spin_unlock(&icmp_lock);
+        /* Enqueue into the reply queue so icmp_echo_seq() can match it
+         * without racing nic_recv() against the netd thread. */
+        reply_enqueue(__builtin_bswap16(ic->id), __builtin_bswap16(ic->seq), src_ip);
     } else if (type == ICMP_DEST_UNREACHABLE) {
         spin_lock(&icmp_lock);
         stats.rx_dest_unreach++;

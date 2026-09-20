@@ -4,6 +4,7 @@
 extern void arp_purge_expired(void);
 #include "dns.h"
 #include "udp.h"
+#include "icmp.h"
 #include "kprintf.h"
 #include "string.h"
 #include "security.h"
@@ -1682,31 +1683,23 @@ int icmp_ping(uint32_t ip, int timeout_ms) {
     uint16_t id = ++ping_id;
     uint16_t seq = 1;
 
-    struct icmp_hdr ic;
-    memset(&ic, 0, sizeof(ic));
-    ic.type = ICMP_ECHO_REQUEST;
-    ic.id = bswap16(id);
-    ic.seq = bswap16(seq);
-    ic.checksum = ones_sum((uint16_t *)&ic, sizeof(ic));
+    /* Drain any stale replies for this id from the queue BEFORE sending */
+    { uint32_t dummy; while (icmp_reply_dequeue(id, seq, &dummy) == 0) {} }
 
-    if (send_ip_packet(ip, IP_PROTO_ICMP, &ic, sizeof(ic)) < 0) return -1;
+    /* Use icmp_send_echo → ip_send (the same proven path that
+     * icmp_echo_seq/HTTPSBOOT uses) instead of the legacy
+     * send_ip_packet path which has subtle IP header bugs. */
+    icmp_send_echo(ip, id, seq);
 
-    int tries = timeout_ms < 10 ? 1 : timeout_ms / 10;
-    for (int i = 0; i < tries; i++) {
-        timer_sleep_ms(1);
-        uint8_t b[2048]; int l;
-        while ((l = nic_recv(b, sizeof(b))) > 0) {
-            if (l < (int)(sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct icmp_hdr))) continue;
-            struct eth_hdr *eth = (struct eth_hdr *)b;
-            if (bswap16(eth->type) != 0x0800) continue;
-            struct ip_hdr *ip_hdr = (struct ip_hdr *)(b + sizeof(struct eth_hdr));
-            if (ip_hdr->protocol != IP_PROTO_ICMP) continue;
-            if (ip_hdr->src_ip != ip) continue;
-            int ip_hdr_len = (ip_hdr->ver_ihl & 0x0F) * 4;
-            struct icmp_hdr *icmp = (struct icmp_hdr *)((uint8_t *)ip_hdr + ip_hdr_len);
-            if (icmp->type == ICMP_ECHO_REPLY && bswap16(icmp->id) == id && bswap16(icmp->seq) == seq)
-                return 0;
-        }
+    /* Use sched_sleep_ms (not timer_sleep_ms) so the scheduler yields to
+     * the netd thread which must call net_poll() → nic_recv() → ip_recv()
+     * → icmp_recv() to enqueue the reply into the queue we check below. */
+    uint64_t start = timer_get_milliseconds();
+    while ((int)(timer_get_milliseconds() - start) < timeout_ms) {
+        sched_sleep_ms(1);
+        uint32_t src;
+        if (icmp_reply_dequeue(id, seq, &src) == 0)
+            return (int)(timer_get_milliseconds() - start);
     }
     return -1;
 }

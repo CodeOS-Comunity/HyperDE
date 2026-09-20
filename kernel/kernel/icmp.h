@@ -106,8 +106,23 @@ void icmp_send_time_exceeded(uint32_t dst, uint8_t code, const void *orig, int o
 void icmp_send_quench(uint32_t dst);
 void icmp_send_timestamp(uint32_t dst, uint16_t id);
 int  icmp_timestamp(uint32_t dst, uint32_t *ts, int timeout_ms);
+int  icmp_ping(uint32_t ip, int timeout_ms);
 void icmp_get_stats(icmp_stats_t *stats);
 void icmp_reset_stats(void);
 void icmp_dump(void);
+
+/* ── ICMP reply queue ──
+ * icmp_recv() enqueues ECHO_REPLY here; icmp_echo_seq() dequeues from it
+ * instead of racing nic_recv() against the netd thread. */
+#define ICMP_REPLY_QUEUE_SIZE 16
+typedef struct {
+    uint16_t id;
+    uint16_t seq;
+    uint32_t src_ip;
+    uint64_t timestamp;  /* ms when reply was queued */
+} icmp_reply_entry_t;
+
+void icmp_reply_queue_init(void);
+int  icmp_reply_dequeue(uint16_t id, uint16_t seq, uint32_t *src_out);
 
 #endif

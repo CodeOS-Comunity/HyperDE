@@ -9,6 +9,7 @@ int strncmp(const char *a, const char *b, size_t n);
 char *strcpy(char *dst, const char *src);
 char *strcat(char *dst, const char *src);
 char *strchr(const char *s, int c);
+char *strrchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
 void *memset(void *ptr, int val, size_t n);
 void *memcpy(void *dst, const void *src, size_t n);
