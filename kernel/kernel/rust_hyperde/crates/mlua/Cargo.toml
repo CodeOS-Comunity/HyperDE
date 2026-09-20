@@ -1,0 +1,15 @@
+[package]
+name = "mlua"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal no_std Lua VM for HyperDE configuration (like Hyprland)"
+
+[lib]
+crate-type = ["rlib"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true

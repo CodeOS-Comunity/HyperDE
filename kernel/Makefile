@@ -113,6 +113,7 @@ else
         -not -path "*/devstore/*" -not -name "initramfs_files.c" \
         -not -path "arch/arm64/*" -not -name "ahci.c" \
         -not -path "*/examples/*" -not -name "x11_server.c" \
+        -not -name "x11_stubs.c" \
         -not -path "lvgl/src/draw/sdl/*" \
         -not -path "lvgl/src/draw/stm32_dma2d/*" \
         -not -path "lvgl/src/draw/renesas/*" \
@@ -130,7 +131,7 @@ SRC_C   += $(QT_BACKEND_DIR)/updater.c
 SRC_C   += $(QT_BACKEND_DIR)/lgame.c
 SRC_C   += $(QT_BACKEND_DIR)/lgame_pong.c
 SRC_C   += $(QT_BACKEND_DIR)/lgame_snake.c
-SRC_C   += kernel/x11_server.c
+SRC_C   += kernel/x11_server.c kernel/x11_stubs.c
     SRC_CXX = kernel/cxx_support.cpp kernel/stdcxx_support.cpp kernel/xserver.cpp arch/fb.cpp \
               kernel/desktop.cpp kernel/qt_desktop.cpp \
               $(QT_BACKEND_DIR)/pixelman.cpp $(PKG_SRC_CXX)

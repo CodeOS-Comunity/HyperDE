@@ -4,11 +4,20 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicPtr, Ordering};
 
+/* ── HyperDE crate dependencies ── */
+extern crate breadx;
+extern crate gdk4_x11;
+extern crate x11_overlay;
+extern crate mlua;
+
 mod wayland;
 mod config;
 mod keybind;
 mod launcher;
 mod notify;
+mod overlay;
+mod animation;
+mod theme;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -920,7 +929,7 @@ pub unsafe extern "C" fn hyperde_shell_init() {
     wayland::hyperde_wl_selftest();
 
     /* load conf.lua config into mutable palette */
-    config::config_parse(include_str!("../../../../userspace/hyperde/conf.lua").as_bytes());
+    config::config_parse_lua(include_str!("../../../../userspace/hyperde/conf.lua").as_bytes());
     palette_load_config();
 }
 
