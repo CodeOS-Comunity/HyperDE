@@ -2,13 +2,8 @@
  * Uses gdk4_x11 easing and animation system for smooth window
  * transitions, panel fades, and window movements.
  * ───────────────────────────────────────────────────────────────────── */
-#![no_std]
 
 use core::ffi::c_char;
-
-extern "C" {
-    fn kprintf(fmt: *const c_char, ...);
-}
 
 use gdk4_x11::{Animation, Easing};
 
@@ -49,13 +44,16 @@ const MAX_ANIMATIONS: usize = 32;
 static mut ANIMATIONS: [Animation; MAX_ANIMATIONS] = [Animation { from: 0.0, to: 0.0, duration_ms: 0, elapsed_ms: 0, easing: Easing::Linear, running: false }; MAX_ANIMATIONS];
 static mut ANIM_TYPES: [AnimationType; MAX_ANIMATIONS] = [AnimationType::Move; MAX_ANIMATIONS];
 static mut ANIM_FROM: [i32; MAX_ANIMATIONS] = [0; MAX_ANIMATIONS];
+static mut ANIM_FROM_Y: [i32; MAX_ANIMATIONS] = [0; MAX_ANIMATIONS];
 static mut ANIM_TO: [i32; MAX_ANIMATIONS] = [0; MAX_ANIMATIONS];
+static mut ANIM_TO_Y: [i32; MAX_ANIMATIONS] = [0; MAX_ANIMATIONS];
 static mut ANIM_W: [u32; MAX_ANIMATIONS] = [0; MAX_ANIMATIONS];
 static mut ANIM_H: [u32; MAX_ANIMATIONS] = [0; MAX_ANIMATIONS];
 static mut ANIM_DONE: [bool; MAX_ANIMATIONS] = [false; MAX_ANIMATIONS];
 static mut ANIM_COUNT: usize = 0;
 
 /// Start a window animation
+#[allow(unused_variables)]
 pub fn start_animation(
     anim_type: AnimationType,
     from_x: i32, from_y: i32, from_w: u32, from_h: u32,
@@ -74,7 +72,9 @@ pub fn start_animation(
         ANIMATIONS[idx] = Animation::new(0.0, 1.0, duration_ms, easing);
         ANIM_TYPES[idx] = anim_type;
         ANIM_FROM[idx] = from_x;
+        ANIM_FROM_Y[idx] = from_y;
         ANIM_TO[idx] = to_x;
+        ANIM_TO_Y[idx] = to_y;
         ANIM_W[idx] = from_w;
         ANIM_H[idx] = from_h;
         ANIM_DONE[idx] = false;

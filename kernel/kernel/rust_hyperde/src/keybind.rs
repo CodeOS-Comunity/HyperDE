@@ -14,11 +14,11 @@
  * Key events come from the Qt panels thread via FFI.
  */
 
-use core::ffi::c_int;
+use core::ffi::{c_char, c_int};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 extern "C" {
-    fn kprintf(fmt: *const core::ffi::c_char, ...);
+    fn kprintf(fmt: *const c_char, ...);
 }
 
 /* ───────────────────────── Key state ───────────────────────── */

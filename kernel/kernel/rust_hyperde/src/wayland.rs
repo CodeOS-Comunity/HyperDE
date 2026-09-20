@@ -20,9 +20,7 @@ extern "C" {
     fn kprintf(fmt: *const c_char, ...);
 }
 
-/* Arena lock: the object/surface registries are behind a spinlock so a wire
- * dispatch (Qt panels thread) can never race the pump / bar render path or a
- * second client context. Everything below is reached under arena_lock(). */
+/* Arena lock */
 static ARENA_LOCK: AtomicBool = AtomicBool::new(false);
 
 fn arena_lock() {

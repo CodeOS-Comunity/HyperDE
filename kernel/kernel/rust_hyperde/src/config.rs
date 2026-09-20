@@ -1,25 +1,8 @@
 /* ───────────────────────── HyperDE Configuration ─────────────────────────
  * Uses the mlua crate for modular Lua-based configuration (like Hyprland).
- *
- * Configuration structure (conf.lua):
- *   return {
- *       general = { ... },
- *       window_manager = { ... },
- *       compositor = { ... },
- *       decorations = { ... },
- *       animations = { ... },
- *       input = { ... },
- *       layout = { ... },
- *       windowrule = { ... },
- *       autostart = { ... },
- *       keybinds = { ... },
- *   }
- *
- * Each section is accessible via config.get("section.key").
- * The config is loaded at boot from an embedded buffer provided by the C side.
  * ───────────────────────────────────────────────────────────────────────── */
 
-#![no_std]
+#![allow(unused)]
 
 use core::ffi::c_char;
 use core::sync::atomic::{AtomicBool, Ordering};

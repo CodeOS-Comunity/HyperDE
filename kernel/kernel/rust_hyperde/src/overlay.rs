@@ -1,7 +1,6 @@
 /* ───────────────────────── HyperDE Overlay Module ─────────────────────────
  * Wraps x11_overlay crate for notification popups and launcher overlays.
  * ───────────────────────────────────────────────────────────────────── */
-#![no_std]
 
 use core::ffi::c_char;
 
@@ -9,7 +8,8 @@ extern "C" {
     fn kprintf(fmt: *const c_char, ...);
 }
 
-use x11_overlay::{Overlay, OverlayKind, OverlayManager, Notification};
+/* Re-exports from x11_overlay crate */
+pub use x11_overlay::{OverlayKind, OverlayManager, Notification};
 
 /* ── Global overlay manager ── */
 

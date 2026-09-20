@@ -17,6 +17,7 @@
  * Each module returns a table that gets merged into the config.
  * ═══════════════════════════════════════════════════════════════════════ */
 #![no_std]
+#![allow(unused)]
 
 use core::ffi::{c_char, c_int};
 

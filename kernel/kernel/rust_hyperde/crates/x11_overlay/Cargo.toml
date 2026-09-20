@@ -6,10 +6,3 @@ description = "X11 overlay windows for HyperDE effects (no_std kernel port)"
 
 [lib]
 crate-type = ["rlib"]
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-lto = true

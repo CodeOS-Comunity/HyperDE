@@ -9,6 +9,7 @@
  *   - Dim-beneath-focus effects
  * ═══════════════════════════════════════════════════════════════════════ */
 #![no_std]
+#![allow(unused)]
 
 use core::ffi::{c_char, c_int};
 

@@ -2,16 +2,10 @@
  * Provides theme configuration loaded via mlua conf.lua.
  * Supports dynamic theme switching and color palettes.
  * ───────────────────────────────────────────────────────────────────── */
-#![no_std]
 
 use core::ffi::c_char;
 
-extern "C" {
-    fn kprintf(fmt: *const c_char, ...);
-    fn malloc(size: usize) -> *mut u8;
-    fn free(p: *mut u8);
-}
-
+#[allow(unused)]
 use crate::config::{config_get, config_get_number, config_get_string};
 
 #[derive(Debug, Clone, Copy)]

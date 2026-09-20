@@ -6,9 +6,9 @@
  * X11 server and framebuffer.
  * ═══════════════════════════════════════════════════════════════════════ */
 #![no_std]
+#![allow(unused)]
 
 use core::ffi::{c_char, c_int};
-use core::sync::atomic::{AtomicBool};
 
 extern "C" {
     fn kprintf(fmt: *const c_char, ...);

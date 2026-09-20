@@ -7,10 +7,12 @@
  * libX11 — just the protocol framing and atom/event plumbing.
  * ═══════════════════════════════════════════════════════════════════════ */
 #![no_std]
+#![allow(unused_assignments)]
 
 use core::ffi::{c_char, c_int};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+#[allow(unused)]
 extern "C" {
     fn kprintf(fmt: *const c_char, ...);
     fn x11_intern_atom(name: *const c_char, only_if_exists: c_int) -> u32;
@@ -382,7 +384,7 @@ pub struct Atoms {
     pub net_wm_state: u32,
     pub net_wm_state_focused: u32,
     pub net_wm_pid: u32,
-    pub net_WM_user_time: u32,
+    pub net_wm_user_time: u32,
 }
 
 impl Atoms {
@@ -403,7 +405,7 @@ impl Atoms {
             net_wm_state: intern_atom("NET_WM_STATE", false),
             net_wm_state_focused: intern_atom("NET_WM_STATE_FOCUSED", false),
             net_wm_pid: intern_atom("NET_WM_PID", false),
-            net_WM_user_time: intern_atom("NET_WM_USER_TIME", false),
+            net_wm_user_time: intern_atom("NET_WM_USER_TIME", false),
         }
     }
 }

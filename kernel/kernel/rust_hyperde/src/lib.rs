@@ -10,6 +10,10 @@ extern crate gdk4_x11;
 extern crate x11_overlay;
 extern crate mlua;
 
+extern "C" {
+    fn kprintf(fmt: *const c_char, ...);
+}
+
 mod wayland;
 mod config;
 mod keybind;
@@ -215,7 +219,6 @@ extern "C" {
     fn pmm_total_pages() -> u64;
     fn lvgl_wm_window_count(wm: *const c_void) -> c_int;
     fn lvgl_wm_window_at(wm: *const c_void, idx: c_int) -> *const LvglWindow;
-    fn kprintf(fmt: *const c_char, ...);
 }
 
 /* ── X11/GNUstep windows as first-class desktop citizens ────────────
