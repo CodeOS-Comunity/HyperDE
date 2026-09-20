@@ -3,9 +3,6 @@
  * Supports dynamic theme switching and color palettes.
  * ───────────────────────────────────────────────────────────────────── */
 
-use core::ffi::c_char;
-
-#[allow(unused)]
 use crate::config::{config_get, config_get_number, config_get_string};
 
 #[derive(Debug, Clone, Copy)]

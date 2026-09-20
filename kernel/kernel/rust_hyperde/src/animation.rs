@@ -3,8 +3,6 @@
  * transitions, panel fades, and window movements.
  * ───────────────────────────────────────────────────────────────────── */
 
-use core::ffi::c_char;
-
 use gdk4_x11::{Animation, Easing};
 
 /* ── Animation types ── */
