@@ -24,4 +24,7 @@ long ftell(FILE *stream);
 int fgetc(FILE *stream);
 int fputc(int c, FILE *stream);
 int fflush(FILE *stream);
+extern FILE *stderr;
+extern FILE *stdout;
+extern FILE *stdin;
 #endif

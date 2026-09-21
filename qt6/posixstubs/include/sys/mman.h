@@ -4,6 +4,7 @@
 #define _CODEOS_SYS_MMAN_H
 
 #include <stdint.h>
+#include <sys/types.h>
 
 /* mmap flags */
 #define MAP_SHARED    0x01

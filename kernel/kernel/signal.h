@@ -118,4 +118,7 @@ void sigorset(sigset_t *dst, const sigset_t *src);
 void sigandset(sigset_t *dst, const sigset_t *src);
 int  sigset_count(const sigset_t *set);
 
+typedef void (*sighandler_t)(int);
+extern sighandler_t signal(int sig, sighandler_t handler);
+
 #endif
