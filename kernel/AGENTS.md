@@ -15,7 +15,12 @@ Guidance for humans and coding agents working on this tree.
 - Kernel-injected packages use a `pkgs/core/<name>/src/KERN` marker. The
   graphics stack lives in `pkgs/core/graphics/` and is compiled into the
   kernel automatically.
-- OpenWeb’s HTTP backend and HTML renderer are Rust: `kernel/kernel/rust_ow/` (needs `cargo`); the renderer writes the C-owned grid globals in `qt6/panels/ow_html.{c,h}` (see the OpenWeb section below).
+- OpenWeb's HTTP backend and HTML renderer are Rust: `kernel/kernel/rust_ow/` (needs `cargo`); the renderer writes the C-owned grid globals in `qt6/panels/ow_html.{c,h}` (see the OpenWeb section below).
+- **Zircon OS** (`Zircon/`) is a standalone mobile/desktop OS built on the CodeOS kernel.
+  It has its own init process (`zircon_init.c`), compositor (`zircond`), and bootable ISO.
+  Build: `make -C Zircon all && make -C Zircon iso`.
+  Zircon uses `kernel/kernel/windows.h` for `window_t`, `kernel/kernel/gui/` for GUI types,
+  and `kernel/kernel/sys/` for kernel IPC syscalls.
 
 ## Build
 ```sh
