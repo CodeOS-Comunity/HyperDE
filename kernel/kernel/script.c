@@ -564,7 +564,10 @@ static node_t *parse_add(lexer_t *lx) {
 }
 
 static node_t *parse_mul(lexer_t *lx) {
-    node_t *n = parse_postfix(lx);
+    /* script engine fix: parse the first operand with parse_unary() so that a
+     * leading unary `not`/`-` parses. The original used parse_postfix(),
+     * which skips unary operators entirely. */
+    node_t *n = parse_unary(lx);
     while (lx->cur.type == TOK_STAR || lx->cur.type == TOK_SLASH || lx->cur.type == TOK_PERCENT) {
         tok_type_t op = lx->cur.type;
         lex_next_token(lx);
@@ -1223,23 +1226,36 @@ static script_val_t repr_obj_key(const char *s, const char *key) {
 
 /* ---- function invocation ---- */
 
-static var_entry_t saved_vars[VAR_MAX];
-static int saved_var_count;
+/* script engine fix: the original kept a single save slot, so nested function
+ * calls overwrote the in-flight frame and corrupted variables whenever a body
+ * made more than one call (e.g. fib(n-1) + fib(n-2)). Use a stack of frames;
+ * call depth is bounded by FUNC_DEPTH_MAX (32), so that many frames suffice. */
+#define VAR_SAVE_STACK 32
+static var_entry_t saved_vars[VAR_SAVE_STACK][VAR_MAX];
+static int saved_var_count[VAR_SAVE_STACK];
+static int save_depth;
 
 static void vars_save(void) {
-    saved_var_count = var_count;
+    if (save_depth >= VAR_SAVE_STACK) return;
+    saved_var_count[save_depth] = var_count;
     for (int i = 0; i < var_count; i++) {
-        saved_vars[i] = vars[i];
-        saved_vars[i].val = _dup(vars[i].val);
+        saved_vars[save_depth][i] = vars[i];
+        saved_vars[save_depth][i].val = _dup(vars[i].val);
     }
+    save_depth++;
 }
 
 static void vars_restore(void) {
+    if (save_depth == 0) {
+        var_count = 0;
+        return;
+    }
+    save_depth--;
     for (int i = 0; i < var_count; i++) _free(&vars[i].val);
-    var_count = saved_var_count;
+    var_count = saved_var_count[save_depth];
     for (int i = 0; i < var_count; i++) {
-        vars[i] = saved_vars[i];
-        saved_vars[i].val.str = 0;  /* ownership moved to vars */
+        vars[i] = saved_vars[save_depth][i];
+        saved_vars[save_depth][i].val.str = 0;  /* ownership moved to vars */
     }
 }
 
@@ -1722,6 +1738,7 @@ void script_init(void) {
     native_count = 0;
     control_flow = CTL_NONE;
     ctrl_val = _mknum(0);
+    save_depth = 0;
 }
 
 int script_eval(const char *input, script_val_t *result) {
