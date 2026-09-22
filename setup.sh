@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if ! command -v pacman >/dev/null 2>&1; then
     echo "This setup script targets Arch-based systems (pacman) only." >&2
     echo "On Debian/Ubuntu install: build-essential qemu-system-x86 xorriso python3" >&2
@@ -66,3 +68,32 @@ echo "CodeOS compiled successfully."
 echo "Boot it with:"
 echo "  ./run.sh                                   # builds ISO + runs QEMU"
 echo "  qemu-system-x86_64 -cdrom kernel/codeos-1-kernel.iso"
+
+# ── CodeOS packages (individual pkgs from the CodeOS-Comunity org) ─────────
+# Every repo in github.com/CodeOS-Comunity is an installable CodeOS package:
+# Fetch (the native package manager) treats the whole org as its online
+# registry (api.github.com/orgs/CodeOS-Comunity/repos), so each repo added
+# there instantly becomes a `fetch -S <name>` package inside CodeOS.
+# Here we clone the current org repos into a host workspace next to the
+# checkout, and build + sync-registry the Fetch tool natively.
+PKGS_DIR="${PKGS_DIR:-$SCRIPT_DIR/CodeOS-pkgs}"
+echo "Cloning CodeOS community packages into $PKGS_DIR/ ..."
+mkdir -p "$PKGS_DIR"
+for repo in OpenWeb CSL NetBeam Fetch Ziggy HyperDE; do
+    if [ -d "$PKGS_DIR/$repo/.git" ]; then
+        git -C "$PKGS_DIR/$repo" pull --ff-only -q
+    else
+        git clone -q --depth 1 "https://github.com/CodeOS-Comunity/$repo" "$PKGS_DIR/$repo"
+    fi
+    echo "  ✓ $repo"
+done
+
+echo "Building Fetch package manager (host tool)..."
+cargo build -q --release --manifest-path "$PKGS_DIR/Fetch/Cargo.toml"
+FETCH_BIN="$PKGS_DIR/Fetch/target/release/fetch"
+echo "Syncing package registry from the CodeOS-Comunity org..."
+"$FETCH_BIN" -Sy || true
+echo "Available packages:"
+"$FETCH_BIN" -Sl || true
+echo "Packages ready in $PKGS_DIR/ — add new repos to the CodeOS-Comunity"
+echo "org and they appear as packages automatically."
