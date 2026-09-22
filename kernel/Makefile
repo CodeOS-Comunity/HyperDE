@@ -187,7 +187,7 @@ USER_ELF = $(addprefix userspace/,$(USER_PROGS))
 # ── Rust backend (ow_http) ──
 RUST_DIR = kernel/rust_ow
 RUST_LIB = $(RUST_DIR)/target/x86_64-unknown-none/release/libow_http.a
-RUST_TOOLCHAIN = /home/codeosuser/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin
+RUST_TOOLCHAIN = $(HOME)/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin
 
 $(RUST_LIB): $(wildcard $(RUST_DIR)/src/*.rs) $(RUST_DIR)/Cargo.toml
 	cd $(RUST_DIR) && PATH="$(RUST_TOOLCHAIN):$$PATH" cargo build --target x86_64-unknown-none --release
