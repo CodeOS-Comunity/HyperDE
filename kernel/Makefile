@@ -34,8 +34,7 @@ ifeq ($(ARCH),arm64)
             arch/arm64/rtc.c \
             arch/arm64/kernel_main.c \
             arch/arm64/handlers.c \
-            arch/arm64/string.c \
-            kernel/kprintf.c
+            arch/arm64/string.c
     SRC_CXX =
     SRC_ASM = $(wildcard arch/arm64/*.S)
     TARGET = codeos-1-kernel-arm64.bin
@@ -271,7 +270,22 @@ ifeq ($(ARCH),arm64)
     RUST_PR_LIB :=
     QT6_OBJS :=
     QT6_LIBS :=
-    OBJ_ALL  := $(SRC_C:.c=.o) $(SRC_CXX:.cpp=.o) $(SRC_ASM:.S=.o)
+    # Sources shared with the x86_64 build (kernel/kprintf.c, ../src/jengine.c)
+    # are compiled under per-arch object names: this tree holds both archs'
+    # artifacts side by side, and a stale cross-arch .o would otherwise get
+    # linked into the arm64 image ("file in wrong format"). Each per-arch
+    # object comes with its own -MMD dependency file via OBJ_ALL/DEPFILES.
+    KPRINTF_OBJ = kernel/kprintf-arm64.o
+    JENGINE_OBJ = ../src/jengine-arm64.o
+    OBJ_ALL  := $(filter-out ../src/jengine.o,$(SRC_C:.c=.o)) \
+                $(SRC_CXX:.cpp=.o) $(SRC_ASM:.S=.o) \
+                $(KPRINTF_OBJ) $(JENGINE_OBJ)
+
+$(KPRINTF_OBJ): kernel/kprintf.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(JENGINE_OBJ): ../src/jengine.c
+	$(CC) $(CFLAGS) -c $< -o $@
 endif
 
 .PHONY: all clean check run run-qemu iso arm64 arm64-run arm64-run-nographic sign-efi signed-iso run-sb sb-vars install-image install install-device run-installed
@@ -668,6 +682,8 @@ run-sb-setup: codeos-1-kernel-signed.iso disk.img
 clean:
 	rm -f $(OBJ) $(DEPFILES) codeos-1-kernel.bin codeos-1-kernel-arm64.bin $(STAGE1_TARGET) kernel/embed_kernel.S *.ftech
 	rm -f codeos-1-kernel-signed.iso bootloader/limine-uefi-cd-signed.bin
+ifneq ($(ARCH),arm64)
 	cd $(RUST_DIR) && cargo clean 2>/dev/null || true
 	cd $(RUST_HD_DIR) && cargo clean 2>/dev/null || true
 	$(MAKE) -C userspace clean
+endif
