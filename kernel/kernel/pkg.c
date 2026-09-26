@@ -553,6 +553,7 @@ const pkg_repo_t pkg_repo_ccp[] = {
     {"sqlite",      "3.42.0",   "Self-contained SQL database engine", "https://sqlite.org", "PublicDomain", 2097152, 0, 0, 0, 0, 0, 0, 0, 3},
     {"mesa",        "23.1.2",   "OpenGL/Vulkan graphics library", "https://mesa3d.org", "MIT", 41943040, 0, 0, 0, 0, 0, 0, 0, 3},
     {"wayland-protocol", "1.49", "Wayland interface definitions for clients and compositors", "https://wayland.freedesktop.org", "MIT", 393216, 0, 0, 0, 0, 0, (const char*[]){"wayland", 0}, 1, 2},
+    {"xws",           "2025.1",  "X Window System (X11) core protocol and extension definitions", "https://www.x.org", "MIT/BSD-2-Clause", 249856, 0, 0, 0, 0, 0, (const char*[]){"x11", "xorg", 0}, 2, 2},
     {"neovim",      "0.9.1",    "Modern extensible Vim-based editor", "https://neovim.io", "Apache2", 14680064, ccp_dep_neovim, 1, 0, (const char*[]){"vim", "emacs", 0}, 2, 0, 0, 6},
     {"emacs",       "28.2",     "Extensible, customizable text editor", "https://gnu.org/emacs", "GPLv3", 41943040, 0, 0, 0, (const char*[]){"vim", "neovim", 0}, 2, 0, 0, 6},
     {"btop",        "1.2.13",   "Resource monitor with GPU and disk stats", "", "Apache2", 262144,       0, 0, 0, 0, 0, 0, 0, 6},
