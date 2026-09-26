@@ -659,6 +659,25 @@ int jbd2_in_transaction(void) { return j_present && j_txn_depth > 0; }
  * It also means replaying a journal that is already up to date is harmless --
  * every transaction rewrites the same bytes -- so we always replay rather than
  * maintaining the clean-shutdown checksum bookkeeping that ext3 uses to skip it.
+ *
+ * ── Known gap: replay does not wrap ──
+ *
+ * The write path calls jbd2_wrap() and the log does wrap, but replay stops at
+ * j_maxlen instead of continuing at j_first.  A transaction that has wrapped
+ * past the end of the log is therefore not recovered, even though it committed
+ * and its home copy may not have been written.
+ *
+ * That cannot lose data today, and the reason is worth stating precisely
+ * because it is a property of the caller rather than of this code: flush()
+ * writes every home location immediately after the commit block (step 4), so
+ * by the time the log has wrapped there is no committed transaction whose
+ * content exists only in the journal.  Replay is re-applying bytes that are
+ * already on disk.
+ *
+ * It becomes a real data-loss bug the moment that stops being true -- which is
+ * exactly what checkpointing would do, and is the main reason checkpointing is
+ * not a simple addition.  Do not read "replayed N committed transactions" as
+ * "every committed transaction was replayed".
  */
 /* Returns 0 if a transaction was applied, 1 if the log simply ended, and -1 if
  * the log is malformed.
