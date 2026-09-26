@@ -306,8 +306,32 @@ check:
 arm64:
 	$(MAKE) ARCH=arm64 all
 
-$(USER_ELF):
+# Each userspace ELF delegates to userspace/Makefile, which owns the real
+# dependency graph -- the sources live in pkgs/core/<name>/src and
+# pkgs/extra/<name>/src, not in this tree, so this Makefile has no
+# meaningful prerequisites to declare.
+#
+# FORCE is what makes this correct.  A rule with no prerequisites whose target
+# already exists is considered up to date, so this recipe never ran on any
+# build after the first one: editing a userspace source rebuilt nothing, and
+# because neither the ELF nor kernel/initramfs_files.c changed, neither did the
+# kernel binary or the ISO that embeds them.  The result was a freshly
+# timestamped ISO and kernel silently carrying the old program, which is worse
+# than a build error because nothing looks wrong.  Confirmed by touching
+# pkgs/core/shell/src/shell.c and watching userspace/shell keep its old
+# timestamp through a full `make codeos-1-kernel.iso`.
+#
+# With FORCE the sub-make runs every time, and it is userspace/Makefile that
+# decides whether anything is actually out of date.  ELF mtimes still only
+# move on a real recompile, so the initramfs and the ISO are not churned
+# either.
+$(USER_ELF): FORCE
 	$(MAKE) -C userspace $(notdir $@)
+
+# Never a real file, so it is always out of date and never satisfied by an
+# existing file of that name.
+.PHONY: FORCE
+FORCE:
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
