@@ -3576,10 +3576,15 @@ static void cmd_fstest(int argc, char **argv) {
 
     if (fstest_stop()) goto done;
 
-    /* 1. read a file that mke2fs populated, proving mount + read path */
+    /* 1. read a file that mke2fs populated, proving mount + read path.
+     * The staged file is "alpha content one\n" -- fs_test.py writes the
+     * trailing newline and mke2fs -d keeps it -- so it is 18 bytes on disk.
+     * Compare all 18.  Comparing the bare 17-char literal would memcmp its
+     * own NUL terminator against the file's '\n' and could never match,
+     * which is not a driver bug. */
     n = ext2_read_file_path("/etc/conf.txt", buf, sizeof(buf) - 1);
     fstest_report("read-prepopulated",
-                  n > 0 && memcmp(buf, "alpha content one", 18) == 0);
+                  n == 18 && memcmp(buf, "alpha content one\n", 18) == 0);
 
     if (fstest_stop()) goto done;
 

@@ -93,6 +93,25 @@ static uint8_t *block_buf;
 static size_t block_buf_size;
 static uint8_t inode_buf[JBD2_MAX_BLOCK_SIZE];  /* Separate buffer for read_inode_block */
 
+/* Zero the whole block buffer, then it is safe to write_block() it.
+ *
+ * Every freshly allocated block must be zeroed before use.  For a data
+ * block the payload overwrites it anyway, but for an *indirect* block the
+ * unwritten slots are the file's block pointers: leave them stale and
+ * read_inode_block() hands back whatever the previous tenant of that block
+ * left there, and the driver writes file data to a block number nobody
+ * allocated.  That is not a leak, it is corruption -- a stale pointer of
+ * 256 lands the write on the inode table and destroys it.
+ *
+ * This has to be block_buf_size, never sizeof(block_buf): block_buf is a
+ * uint8_t *, so sizeof(block_buf) is a pointer width (8) and the obvious
+ * spelling silently zeroes 8 bytes of a 1024-byte block.
+ */
+static void zero_block_buf(void) {
+    if (!block_buf) return;
+    memset(block_buf, 0, block_buf_size);
+}
+
 static int read_block(uint32_t block_num) {
     /* A journalled write is not on the disk yet -- it lives in the open
      * transaction's staging area until that transaction commits. So a
@@ -541,7 +560,7 @@ static uint32_t alloc_block_goal(int preferred_bg) {
                     sb.free_blocks_count--;
                     write_superblock();
 
-                    memset(block_buf, 0, block_size > sizeof(block_buf) ? sizeof(block_buf) : block_size);
+                    zero_block_buf();
                     write_block(abs_block);
 
                     return abs_block;
@@ -628,13 +647,19 @@ static int write_indir_ptr(uint32_t indir_block, uint32_t index, uint32_t ptr) {
     return write_block(indir_block);
 }
 
-static uint32_t alloc_or_get_indir_block(uint32_t parent_block, uint32_t parent_index, int inode_num) {
+/* Fetch (allocating if needed) the sub-indirect block at parent_index.
+ * `inode` is charged for the block when one is allocated, because i_blocks
+ * counts every block the inode owns -- the pointer blocks as well as the
+ * data.  e2fsck recomputes i_blocks and reports the difference. */
+static uint32_t alloc_or_get_indir_block(uint32_t parent_block, uint32_t parent_index,
+                                         int inode_num, struct ext2_inode *inode) {
     uint32_t blk;
     if (parent_block == 0) {
         blk = alloc_block_for_inode(inode_num);
         if (blk == 0) return 0;
-        memset(block_buf, 0, block_size > sizeof(block_buf) ? sizeof(block_buf) : block_size);
+        zero_block_buf();
         write_block(blk);
+        inode->blocks += block_size / 512;
         return blk;
     }
     if (read_block(parent_block) < 0) return 0;
@@ -642,9 +667,10 @@ static uint32_t alloc_or_get_indir_block(uint32_t parent_block, uint32_t parent_
     if (blk != 0) return blk;
     blk = alloc_block_for_inode(inode_num);
     if (blk == 0) return 0;
-    memset(block_buf, 0, block_size > sizeof(block_buf) ? sizeof(block_buf) : block_size);
+    zero_block_buf();
     write_block(blk);
     write_indir_ptr(parent_block, parent_index, blk);
+    inode->blocks += block_size / 512;
     return blk;
 }
 
@@ -677,8 +703,9 @@ int ext2_write_file(int inode_num, const void *buf, int max, int offset) {
                     if (inode.block[12] == 0) {
                         inode.block[12] = alloc_block_for_inode(inode_num);
                         if (inode.block[12] == 0) return -1;
-                        memset(block_buf, 0, block_size > sizeof(block_buf) ? sizeof(block_buf) : block_size);
+                        zero_block_buf();
                         write_block(inode.block[12]);
+                        inode.blocks += block_size / 512;
                     }
                     write_indir_ptr(inode.block[12], ind_idx, phys_block);
                 } else {
@@ -687,10 +714,11 @@ int ext2_write_file(int inode_num, const void *buf, int max, int offset) {
                     if (inode.block[13] == 0) {
                         inode.block[13] = alloc_block_for_inode(inode_num);
                         if (inode.block[13] == 0) return -1;
-                        memset(block_buf, 0, block_size > sizeof(block_buf) ? sizeof(block_buf) : block_size);
+                        zero_block_buf();
                         write_block(inode.block[13]);
+                        inode.blocks += block_size / 512;
                     }
-                    uint32_t ind_block = alloc_or_get_indir_block(inode.block[13], dind_idx, inode_num);
+                    uint32_t ind_block = alloc_or_get_indir_block(inode.block[13], dind_idx, inode_num, &inode);
                     if (ind_block == 0) return -1;
                     write_indir_ptr(ind_block, ind_idx2, phys_block);
                 }
@@ -699,7 +727,7 @@ int ext2_write_file(int inode_num, const void *buf, int max, int offset) {
             inode.blocks += block_size / 512;
         }
 
-        memset(block_buf, 0, block_size > sizeof(block_buf) ? sizeof(block_buf) : block_size);
+        zero_block_buf();
         memcpy(block_buf + block_off, (const uint8_t *)buf + total, copy);
         write_block(phys_block);
 
@@ -1004,7 +1032,7 @@ int ext2_mkdir(const char *path) {
     /* Need a data block for the directory */
     uint32_t block = alloc_block_for_inode(inode_num);
     if (block == 0) return -1;
-    memset(block_buf, 0, block_size > sizeof(block_buf) ? sizeof(block_buf) : block_size);
+    zero_block_buf();
 
     struct ext2_dirent *dot = (struct ext2_dirent *)block_buf;
     dot->inode = inode_num;
