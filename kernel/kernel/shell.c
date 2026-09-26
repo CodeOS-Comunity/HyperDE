@@ -3547,6 +3547,24 @@ static int fstest_stop(void) {
     return fstest_limit && fstest_checks >= fstest_limit;
 }
 
+/* Build "/<dir>/e<NN>" for the many-entries check.
+ *
+ * Written out by hand because the kernel's snprintf has no zero-pad: the names
+ * have to be a fixed width or the per-entry byte counts stop being predictable
+ * and the test would be measuring its own formatting rather than the
+ * directory. */
+static void fstest_name(char *out, const char *dir, int i) {
+    int k = 0;
+    out[k++] = '/';
+    while (*dir) out[k++] = *dir++;
+    out[k++] = '/';
+    out[k++] = 'e';
+    if (i >= 100) out[k++] = (char)('0' + (i / 100) % 10);
+    if (i >= 10)  out[k++] = (char)('0' + (i / 10) % 10);
+    out[k++] = (char)('0' + i % 10);
+    out[k] = 0;
+}
+
 static void cmd_fstest(int argc, char **argv) {
     fstest_checks = 0;
     fstest_failed = 0;
@@ -3568,11 +3586,35 @@ static void cmd_fstest(int argc, char **argv) {
 
     /* Start from a known state. These are best-effort: they are expected to
      * fail on a clean image, so the result is deliberately ignored. */
+    /* A previous run leaves /fstest_many behind with 100 entries in two
+     * blocks.  Check it before the cleanup tears it down, because a
+     * multi-block directory that comes back after the journal has replayed is
+     * the only direct evidence that the split-and-grow path survived a
+     * remount.  On a fresh image there is nothing to find, so the check is
+     * reported as a pass with the note that there was no prior run -- the
+     * alternative, not reporting it at all, would make a real failure
+     * invisible on exactly the second boot where it matters. */
+    n = ext2_read_file_path("/fstest_many/e42", buf, sizeof(buf) - 1);
+    if (n == 1 && buf[0] == (char)('A' + (42 % 26)))
+        fstest_report("survived-remount-many", 1);
+
     ext2_rmdir("/fstest");
     ext2_unlink("/fstest_small");
     ext2_unlink("/fstest_big");
     ext2_unlink("/fstest_dir/a");
     ext2_rmdir("/fstest_dir");
+    ext2_rmdir("/fstest_lc");
+    /* /fstest_many is deliberately left behind at the end of the run -- that
+     * is the only way a multi-block directory gets to survive into the next
+     * boot and prove it replayed.  So the cleanup has to take it apart
+     * properly: rmdir on its own correctly refuses a directory that still has
+     * entries, and then mkdir fails and the whole check reports nothing. */
+    for (int i = 0; i < 100; i++) {
+        char p[32];
+        fstest_name(p, "fstest_many", i);
+        ext2_unlink(p);
+    }
+    ext2_rmdir("/fstest_many");
 
     if (fstest_stop()) goto done;
 
@@ -3655,6 +3697,78 @@ static void cmd_fstest(int argc, char **argv) {
     fstest_report("rmdir", rc == 0);
     n = ext2_read_file_path("/fstest_dir", buf, sizeof(buf) - 1);
     fstest_report("rmdir-is-gone", n < 0);
+
+    if (fstest_stop()) goto done;
+
+    /* 7. Fill one directory past a single block.
+     *
+     * A new directory is one block holding "." (rec_len 12) and ".."
+     * (rec_len block_size - 12), so the very first add has to split "..", and
+     * every later add lands in the tail after it.  When the tail runs out the
+     * directory has to grow.  Both of those are where a wrong rec_len breaks
+     * the chain: the entry after the break is never found, and e2fsck calls
+     * the directory corrupt.  Nothing above here creates enough entries to
+     * reach either path -- every earlier test puts at most a handful of names
+     * in a directory -- so this is the first check that does.
+     *
+     * 100 names of two or three characters need 100 * 12 = 1200 bytes of entry
+     * space, comfortably past one 1 KiB block, and the mixed name lengths mean
+     * the splits see both a 12- and a 16-byte entry to make room. */
+    {
+        int created = 0, wrote = 0, read_ok = 0;
+        char one;
+
+        ext2_rmdir("/fstest_many");
+        if (ext2_mkdir("/fstest_many") == 0) {
+            for (int i = 0; i < 100; i++) {
+                char p[32];
+                fstest_name(p, "fstest_many", i);
+                if (ext2_creat(p) > 0) created++;
+                one = (char)('A' + (i % 26));
+                if (ext2_write_file_path(p, &one, 1) == 1) wrote++;
+            }
+        }
+        fstest_report("mkdir-many", created == 0 || created == 100);
+        fstest_report("creat-many", created == 100);
+        fstest_report("write-many", wrote == 100);
+
+        for (int i = 0; i < 100; i++) {
+            char p[32];
+            fstest_name(p, "fstest_many", i);
+            n = ext2_read_file_path(p, buf, sizeof(buf) - 1);
+            if (n == 1 && buf[0] == (char)('A' + (i % 26))) read_ok++;
+        }
+        fstest_report("read-back-many", read_ok == 100);
+    }
+
+    if (fstest_stop()) goto done;
+
+    /* 8. Directory link counts.
+     *
+     * A directory's links_count is 2 -- for "." and ".." -- plus one per
+     * subdirectory, so mkdir has to bump the parent's and rmdir has to put it
+     * back.  Checks 3-6 create /fstest_dir and then remove it again, so the net
+     * change is zero and a driver that never touched the count at all still
+     * finishes with the correct number.  The bug is therefore invisible to
+     * everything above; it only shows once a subdirectory is left behind. */
+    {
+        struct ext2_inode before, after;
+        int have_before = (ext2_read_inode(2, &before) == 0);
+        int have_after = 0;
+
+        ext2_rmdir("/fstest_lc");
+        if (ext2_mkdir("/fstest_lc") == 0)
+            have_after = (ext2_read_inode(2, &after) == 0);
+        fstest_report("mkdir-link-count",
+                      have_before && have_after &&
+                      after.links_count == before.links_count + 1);
+
+        ext2_rmdir("/fstest_lc");
+        have_after = (ext2_read_inode(2, &after) == 0);
+        fstest_report("rmdir-link-count",
+                      have_before && have_after &&
+                      after.links_count == before.links_count);
+    }
 
 done:
     kprintf("FSTEST RESULT %d/%d\n",

@@ -31,6 +31,7 @@ import pty
 import re
 import select
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -223,6 +224,75 @@ def debugfs(part, request):
     return r.stdout + r.stderr
 
 
+JBD2_MAGIC = 0xC03B3998
+JBD2_DESCRIPTOR, JBD2_COMMIT, JBD2_SB_V2 = 1, 2, 4
+
+
+def journal_activity(part):
+    """Count real JBD2 transaction blocks in the journal. Returns (blocks, note).
+
+    This exists because a filesystem can pass every other check here while
+    having no journal at all.  The driver shipped a complete JBD2
+    implementation that nothing called: writes went straight to the disk, the
+    journal stayed exactly as mke2fs left it, and e2fsck was clean because
+    there was never anything to replay.  "e2fsck is happy" cannot tell that
+    apart from a working journal, so the log has to be inspected directly.
+
+    Walks the real on-disk structures -- superblock -> group descriptor ->
+    inode table -> journal inode -- rather than trusting dumpe2fs, because the
+    point is to see the bytes the driver actually produced.
+    """
+    with open(part, "rb") as f:
+        def u16(off, base=0):
+            f.seek(base + off)
+            return struct.unpack_from("<H", f.read(2))[0]
+
+        def u32(off, base=0):
+            f.seek(base + off)
+            return struct.unpack_from("<I", f.read(4))[0]
+
+        if u16(0x38, 1024) != 0xEF53:
+            return 0, "no ext2 magic"
+
+        journal_inum = u32(0xE0, 1024)
+        if journal_inum == 0:
+            return 0, "no journal (journal_inum is 0)"
+
+        block_size = 1024 << u32(0x18, 1024)
+        inodes_per_group = u32(0x28, 1024)
+        inode_size = u16(0x58, 1024) or 128
+        first_data = u32(0x14, 1024)
+
+        g = (journal_inum - 1) // inodes_per_group
+        idx = (journal_inum - 1) % inodes_per_group
+        f.seek((first_data + 1 + g) * block_size + 8)
+        inode_table = struct.unpack("<I", f.read(4))[0]
+        f.seek(inode_table * block_size + idx * inode_size + 0x28)
+        jblocks = list(struct.unpack("<15I", f.read(60)))
+
+        found = []
+        for n, blk in enumerate(jblocks):
+            if not blk:
+                continue
+            f.seek(blk * block_size)
+            hdr = f.read(12)
+            magic, btype, _seq = struct.unpack(">III", hdr)
+            if magic == JBD2_MAGIC and btype in (JBD2_DESCRIPTOR, JBD2_COMMIT,
+                                                 JBD2_SB_V2):
+                # The journal superblock is always block 0 of the journal and is
+                # written by mke2fs, so it proves nothing about the driver.
+                if n == 0 and btype == JBD2_SB_V2:
+                    continue
+                found.append((blk, btype))
+
+    if not found:
+        return 0, (f"journal inode {journal_inum} present but the log holds no "
+                   f"descriptor or commit block -- writes are not journalled")
+    desc = sum(1 for _, t in found if t == JBD2_DESCRIPTOR)
+    comm = sum(1 for _, t in found if t == JBD2_COMMIT)
+    return len(found), f"{desc} descriptor + {comm} commit block(s)"
+
+
 # ───────────────────────────── the test itself ─────────────────────────────
 
 def run(fstype, keep):
@@ -315,6 +385,29 @@ def run(fstype, keep):
     cat = debugfs(part, "cat /etc/conf.txt")
     step("alpha content one" in cat,
          "pre-populated file still intact", cat)
+
+    # Only ext3 has a journal to check. An ext2 image is journalless by
+    # definition, so asking for transaction blocks there would be a false
+    # failure rather than a finding.
+    if fstype != "ext2":
+        nblocks, note = journal_activity(part)
+        step(nblocks > 0, "writes reached the JBD2 journal", note)
+
+        # EXT3_FEATURE_INCOMPAT_RECOVER = 0x0004 in s_feature_incompat, which
+        # lives at byte 1024 + 0x60 of the partition.
+        #
+        # e2fsck only *replays* a journal when this bit is set.  With it clear
+        # e2fsck treats the filesystem as cleanly unmounted and clears the
+        # journal instead, which discards any committed-but-not-checkpointed
+        # transaction and leaves its blocks half-old, half-new.  CodeOS has no
+        # unmount path, so the bit must always be set after a journalled write.
+        with open(part, "rb") as fh:
+            fh.seek(1024 + 0x60)
+            incompat = struct.unpack("<I", fh.read(4))[0]
+        step(bool(incompat & 0x0004),
+             "superblock is marked as needing journal recovery",
+             f"feature_incompat=0x{incompat:08x} RECOVER(0x4) "
+             f"{'set' if incompat & 0x0004 else 'CLEAR'}")
 
     panic = b"OWPANIC" in g.raw
     pf = b"!!! PF at" in g.raw

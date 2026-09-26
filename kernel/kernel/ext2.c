@@ -147,6 +147,8 @@ static int read_block_to_buf(uint32_t block_num, uint8_t *buf) {
     return block_read_sectors(p.start_lba + sector, (uint8_t)count, buf);
 }
 
+static int write_superblock(void);
+
 int ext2_mount(int part_idx) {
     partition_t p;
     if (part_get(part_idx, &p) < 0) return 0;
@@ -182,6 +184,27 @@ int ext2_mount(int part_idx) {
 
     /* Initialize the journal if this is an ext3 image (journal inode present). */
     if (sb.journal_inum != 0) {
+        /* Claim the filesystem as needing recovery before touching anything.
+         *
+         * EXT3_FEATURE_INCOMPAT_RECOVER (0x0004 in s_feature_incompat, not in
+         * s_feature_compat where HAS_JOURNAL lives) is the "not cleanly
+         * unmounted" flag, and it is set the moment a journal is written to
+         * and cleared only by a real unmount that empties the journal.
+         *
+         * CodeOS has no unmount -- the VM is killed whenever the user stops it,
+         * and there is no path that could checkpoint and clear the flag.  So
+         * the flag is set here and never cleared, which is the honest state:
+         * the journal may or may not be consistent, and the next mount has to
+         * find out by replaying.
+         *
+         * Leaving it clear is not merely untidy.  e2fsck reads it as "clean
+         * shutdown" and then *discards* the journal instead of replaying it
+         * ("Superblock needs_recovery flag is clear, but journal has data"),
+         * so any transaction that was committed but not yet checkpointed is
+         * thrown away -- and its blocks are half-old, half-new, which is
+         * precisely the corruption the journal existed to prevent. */
+        sb.feature_incompat |= 0x0004;
+        write_superblock();
         jbd2_init(sb.journal_inum);
     }
 
@@ -596,6 +619,33 @@ static int write_bg_desc(int bg, struct ext2_bg_desc *bgd) {
     if (read_block(block_num) < 0) return -1;
     memcpy(block_buf + off, bgd, sizeof(struct ext2_bg_desc));
     return write_block(block_num);
+}
+
+/* Keep a group's directory count in step with its inode table.
+ *
+ * e2fsck recounts the directories in each group from the inode table and
+ * compares: "Directories count wrong for group #0 (4, counted=5)".  The
+ * allocator and the inode allocator both maintain their group's free counts,
+ * so the directory count being left alone is an omission rather than a
+ * deliberate simplification -- and it matters beyond tidiness, because a
+ * real `e2fsck -y` resolves the disagreement by rewriting the group
+ * descriptor, so the driver and e2fsck then disagree about what is on disk.
+ *
+ * The count belongs to the group holding the directory's *inode*, not the
+ * group holding its data blocks, because that is what e2fsck counts.  The two
+ * can differ: a directory's blocks are allocated with the inode's own group as
+ * the goal, but a 2 KiB directory spans into the next group. */
+static void bump_dir_count(int inode_num, int delta) {
+    if (inode_num <= 0) return;
+    uint32_t bg = (inode_num - 1) / inodes_per_group;
+    struct ext2_bg_desc bgd;
+    if (read_bg_desc(bg, &bgd) < 0) return;
+    if (delta > 0) {
+        if (bgd.used_dirs_count != 0xFFFF) bgd.used_dirs_count++;
+    } else if (bgd.used_dirs_count > 0) {
+        bgd.used_dirs_count--;
+    }
+    write_bg_desc(bg, &bgd);
 }
 
 int ext2_write_inode(int inode_num, const volatile struct ext2_inode *buf) {
@@ -1020,23 +1070,31 @@ static int add_dirent(int dir_inode, const char *name, int new_inode, int file_t
     /* Need to extend the directory */
     if (dir_size > 0) {
         int last_off = 0;
-        int last_rec_len = 0;
         off = 0;
         while (off < dir_size) {
             struct ext2_dirent *de = (struct ext2_dirent *)(dir_buf + off);
             if (de->inode == 0) { off += de->rec_len; continue; }
             if (de->rec_len == 0) break;
             last_off = off;
-            last_rec_len = de->rec_len;
             off += de->rec_len;
         }
-        int free_space = last_rec_len - (sizeof(struct ext2_dirent) + ((struct ext2_dirent *)(dir_buf + last_off))->name_len);
-        free_space = (free_space + 3) & ~3;
+        struct ext2_dirent *last = (struct ext2_dirent *)(dir_buf + last_off);
+        int old_name_len = last->name_len;
+        int old_entry_size = (sizeof(struct ext2_dirent) + old_name_len + 3) & ~3;
+        if (old_entry_size < 8) old_entry_size = 8;
+        int old_rec = last->rec_len;
+
+        /* The space this split actually leaves is old_rec - old_entry_size.
+         * Deriving it from the same old_entry_size the split below installs is
+         * the whole point: measuring against the unrounded 8 + name_len
+         * overstates the room by up to 3 bytes plus the rounding, so the test
+         * could pass with a name that does not fit.  The new entry would then
+         * be written with rec_len < 8, or would overrun into the entry after
+         * it, and the directory's rec_len chain breaks -- which is what makes
+         * e2fsck call the directory corrupt and makes every later lookup in it
+         * miss. */
+        int free_space = old_rec - old_entry_size;
         if (free_space >= entry_size) {
-            struct ext2_dirent *last = (struct ext2_dirent *)(dir_buf + last_off);
-            int old_name_len = last->name_len;
-            int old_entry_size = (sizeof(struct ext2_dirent) + old_name_len + 3) & ~3;
-            int old_rec = last->rec_len;
             /* Shorten last entry to its actual size; new entry takes the rest. */
             last->rec_len = old_entry_size;
             off = last_off + old_entry_size;
@@ -1052,32 +1110,57 @@ static int add_dirent(int dir_inode, const char *name, int new_inode, int file_t
         }
     }
 
-    /* Append new block */
-    /* Update the previous entry's rec_len to point to this new entry */
-    if (dir_size > 0) {
-        int last_off = 0;
-        int off = 0;
-        while (off < dir_size) {
-            struct ext2_dirent *de = (struct ext2_dirent *)(dir_buf + off);
-            if (de->rec_len == 0) break;
-            last_off = off;
-            off += de->rec_len;
-        }
-        if (off == dir_size) {
-            struct ext2_dirent *last = (struct ext2_dirent *)(dir_buf + last_off);
-            last->rec_len = dir_size - last_off;
-        }
+    /* No room left in the existing blocks: grow the directory by one whole
+     * block.
+     *
+     * This used to grow by entry_size, which is wrong twice over.
+     *
+     * A directory's i_size is always a multiple of the block size, so an inode
+     * of 1228 bytes is malformed on its face -- e2fsck rejects the whole
+     * filesystem with "i_size is 1228, should be 2048".
+     *
+     * And the new entry was written at the new end of the buffer with
+     * rec_len == entry_size and nothing after it, so the new block had no
+     * terminating entry.  A walker steps off the end of the real entries onto
+     * rec_len == 0 and stops there, which e2fsck reports as "directory
+     * corrupted" and which silently hides every entry that would have come
+     * after it.  Filling a directory one entry at a time is enough to hit
+     * this: 100 short names need 1200 bytes of entry space against a 1 KiB
+     * block.
+     *
+     * So the new block holds the new entry followed by a free entry whose
+     * rec_len runs to the end of the block, which is what terminates the chain.
+     * The previous block needs no adjustment: we only reach here when its last
+     * entry already spans to the block end, because a last entry with a
+     * usable free tail would have been split above. */
+    if (dir_size % block_size != 0) {
+        /* Unreachable for any directory this driver wrote, because every path
+         * above grows by whole blocks.  If it ever happens the directory is
+         * already malformed, and appending into it would compound the damage
+         * rather than repair it -- the entry would land mid-block, and the
+         * partial block it lands in has no terminating entry either. */
+        free(dir_buf);
+        return -1;
     }
-    int new_size = dir_size + entry_size;
-    uint8_t *tmp = (uint8_t *)malloc(new_size);
+    int new_size = dir_size + block_size;
+    uint8_t *tmp = (uint8_t *)malloc((size_t)new_size);
     if (!tmp) { free(dir_buf); return -1; }
-    if (dir_size > 0) memcpy(tmp, dir_buf, dir_size);
+    memset(tmp, 0, (size_t)new_size);
+    if (dir_size > 0) memcpy(tmp, dir_buf, (size_t)dir_size);
+
     struct ext2_dirent *new_de = (struct ext2_dirent *)(tmp + dir_size);
     new_de->inode = new_inode;
     new_de->rec_len = entry_size;
     new_de->name_len = name_len;
     new_de->file_type = file_type;
     memcpy(new_de->name, name, name_len);
+
+    struct ext2_dirent *tail = (struct ext2_dirent *)(tmp + dir_size + entry_size);
+    tail->inode = 0;
+    tail->rec_len = (uint16_t)(block_size - entry_size);
+    tail->name_len = 0;
+    tail->file_type = 0;
+
     int r = ext2_write_file(dir_inode, tmp, new_size, 0);
     free(tmp);
     free(dir_buf);
@@ -1207,6 +1290,21 @@ static int ext2_mkdir_impl(const char *path) {
     inode.size = block_size;
     inode.blocks = block_size / 512;
     ext2_write_inode(inode_num, &inode);
+
+    /* Only now is it a directory rather than a free inode, so this is the
+     * point at which the group's directory count has to follow. */
+    bump_dir_count(inode_num, +1);
+
+    /* A directory's links_count is 2 (for "." and "..") plus one per
+     * subdirectory it holds, so creating a subdirectory has to bump the
+     * parent's.  e2fsck recomputes the count from the directory's contents and
+     * reports the difference; leaving it alone makes every mkdir leave a
+     * filesystem that a real e2fsck wants to "fix". */
+    struct ext2_inode parent;
+    if (ext2_read_inode(parent_ent.inode, &parent) == 0) {
+        parent.links_count++;
+        ext2_write_inode(parent_ent.inode, &parent);
+    }
 
     return 0;
 }
@@ -1368,10 +1466,24 @@ static int ext2_rmdir_impl(const char *path) {
 
     if (del_dirent(parent_ent.inode, name_part) < 0) return -1;
 
+    /* Mirror of the increment in ext2_mkdir: the parent loses a subdirectory,
+     * so its links_count goes back down.  See the comment there. */
+    struct ext2_inode parent;
+    if (ext2_read_inode(parent_ent.inode, &parent) == 0 && parent.links_count > 0) {
+        parent.links_count--;
+        ext2_write_inode(parent_ent.inode, &parent);
+    }
+
     free_blocks_by_inode(&inode);
     memset(&inode, 0, sizeof(inode));
     ext2_write_inode(ent.inode, &inode);
     free_inode(ent.inode);
+
+    /* After the inode is released, so it cannot be double-counted by a
+     * concurrent walk -- there is no concurrency, but the ordering keeps the
+     * two operations adjacent in the journal, which matters once replay is
+     * what recovers the filesystem. */
+    bump_dir_count(ent.inode, -1);
     return 0;
 }
 
