@@ -41,9 +41,11 @@
 #include "security.h"
 #include "ad_block.h"
 #include "version.h"
+#include "netdev.h"
 static void run_builtin(int argc, char **argv);
 static int str_to_int(const char *s);
 extern void cmd_waydroid(int argc, char **argv);
+static void cmd_systemm(int argc, char **argv);
 
 #define CMD_BUF_SIZE 256
 #define MAX_ARGS     32
@@ -4227,6 +4229,7 @@ static void run_builtin(int argc, char **argv) {
     else if (strcmp(cmd, "wineserver") == 0) cmd_wineserver(argc, argv);
     else if (strcmp(cmd, "xora") == 0) cmd_xora(argc, argv);
     else if (strcmp(cmd, "nettest") == 0) cmd_nettest(argc, argv);
+    else if (strcmp(cmd, "systemm") == 0) cmd_systemm(argc, argv);
     else kprintf("%s: command not found\n", cmd);
 }
 
@@ -4398,4 +4401,385 @@ void shell_selftest(void) {
     cmd_nettest(1, nargv);
 
     kprintf("SHELLTEST: done\n");
+}
+
+/* =====================================================================
+ * systemm — storage + service + package/network control
+ *
+ * Helper functions called by the builtin.  These are thin wrappers around
+ * existing kernel functionality, so the builtin stays a presentation layer.
+ * ===================================================================== */
+
+static void sysm_blk_list(void) {
+    if (!block_available()) {
+        kprintf("no block device detected\n");
+        return;
+    }
+    int sectors, is_lba;
+    block_get_info(&sectors, &is_lba);
+    kprintf("disk: %s (%d MB, %s LBA)\n",
+            block_backend_name(),
+            (int)((uint64_t)sectors * 512 / 1048576),
+            is_lba ? "48-bit" : "28-bit");
+    kprintf("  sectors: %d\n", sectors);
+}
+
+static void sysm_blk_part(const char *dev) {
+    (void)dev;  /* single disk for now */
+    if (!block_available()) { kprintf("no block device\n"); return; }
+    int np = part_count();
+    if (np == 0) { kprintf("no partitions\n"); return; }
+    kprintf("partitions on %s:\n", block_backend_name());
+    kprintf("  idx  boot  type  start_lba      sectors        size (MB)\n");
+    for (int i = 0; i < np; i++) {
+        partition_t p;
+        if (part_get(i, &p) < 0) continue;
+        int mb = (int)((uint64_t)p.sector_count * 512 / 1048576);
+        kprintf("  %2d   %s    0x%02x  %-12u  %-12u  %d\n",
+                i, p.bootable ? "*" : " ", p.type,
+                p.start_lba, p.sector_count, mb);
+    }
+}
+
+static int read_root_superblock(uint8_t *sb) {
+    /* Read the superblock of the root ext2/3 filesystem.
+     * The root is always partition 0 of the boot disk. */
+    if (!block_available()) return -1;
+    partition_t p;
+    if (part_get(0, &p) < 0) return -1;
+    if (block_read_sectors(p.start_lba + 2, 2, sb) < 0) return -1;  /* block 1 = superblock, 1 KiB blocks = 2 sectors */
+    if (*(uint16_t*)(sb + 0x38) != 0xEF53) return -1;
+    return 0;
+}
+
+static void sysm_fs_list(void) {
+    extern int ext2_mounted(void);
+    if (!ext2_mounted()) {
+        kprintf("no ext2/3 filesystem mounted\n");
+        return;
+    }
+    uint8_t sb[1024];
+    if (read_root_superblock(sb) < 0) {
+        kprintf("fs_list: cannot read superblock\n");
+        return;
+    }
+    uint32_t bs = *(uint32_t*)(sb + 0x18);
+    if (bs == 0) bs = 1024;
+    else bs = 1024 << bs;
+    uint32_t blocks = *(uint32_t*)(sb + 0x04);
+    uint32_t free = *(uint32_t*)(sb + 0x0C);
+    int total_mb = (int)((uint64_t)blocks * bs / 1048576);
+    int free_mb = (int)((uint64_t)free * bs / 1048576);
+    int used_pct = total_mb ? (100 * (total_mb - free_mb) / total_mb) : 0;
+    kprintf("mounted filesystems:\n");
+    kprintf("  mount  type    size (MB)  free (MB)  used%%\n");
+    kprintf("  /      ext%c   %-10d  %-10d  %d%%\n",
+            (sb[0x5C] & 4) ? '3' : '2', total_mb, free_mb, used_pct);
+}
+
+static void sysm_fs_info(const char *mount) {
+    (void)mount;  /* only / supported */
+    uint8_t sb[1024];
+    if (read_root_superblock(sb) < 0) { kprintf("fs_info: cannot read superblock\n"); return; }
+
+    uint32_t inodes = *(uint32_t*)(sb + 0x00);
+    uint32_t blocks = *(uint32_t*)(sb + 0x04);
+    uint32_t free_blocks = *(uint32_t*)(sb + 0x0C);
+    uint32_t free_inodes = *(uint32_t*)(sb + 0x10);
+    uint32_t first_data = *(uint32_t*)(sb + 0x14);
+    uint32_t log_bs = *(uint32_t*)(sb + 0x18);
+    uint32_t bp_group = *(uint32_t*)(sb + 0x20);
+    uint32_t ip_group = *(uint32_t*)(sb + 0x28);
+    uint16_t magic = *(uint16_t*)(sb + 0x38);
+    uint32_t state = *(uint32_t*)(sb + 0x3C);
+    uint32_t feat_compat = *(uint32_t*)(sb + 0x5C);
+    uint32_t feat_incompat = *(uint32_t*)(sb + 0x60);
+    uint32_t feat_ro = *(uint32_t*)(sb + 0x64);
+    uint32_t journal_inum = *(uint32_t*)(sb + 0xE0);
+    uint16_t desc_size = *(uint16_t*)(sb + 0xFE);
+
+    uint32_t bs = log_bs ? (1024 << log_bs) : 1024;
+    kprintf("superblock for %s:\n", mount);
+    kprintf("  magic:              0x%04x (%s)\n", magic, magic == 0xEF53 ? "ext2/3" : "invalid");
+    kprintf("  state:              0x%08x (%s)\n", state, (state & 1) ? "clean" : "dirty");
+    kprintf("  block size:         %u\n", bs);
+    kprintf("  blocks:             %u (total %u MB)\n", blocks, (int)((uint64_t)blocks * bs / 1048576));
+    kprintf("  free blocks:        %u (%u MB)\n", free_blocks, (int)((uint64_t)free_blocks * bs / 1048576));
+    kprintf("  inodes:             %u\n", inodes);
+    kprintf("  free inodes:        %u\n", free_inodes);
+    kprintf("  blocks/group:       %u\n", bp_group);
+    kprintf("  inodes/group:       %u\n", ip_group);
+    kprintf("  first data block:   %u\n", first_data);
+    kprintf("  feat compat:        0x%08x", feat_compat);
+    if (feat_compat & 1) kprintf(" (has_journal)");
+    if (feat_compat & 2) kprintf(" (resize_inode)");
+    kprintf("\n");
+    kprintf("  feat incompat:      0x%08x", feat_incompat);
+    if (feat_incompat & 1) kprintf(" (filetype)");
+    if (feat_incompat & 2) kprintf(" (recovery)");
+    if (feat_incompat & 4) kprintf(" (journal)");
+    kprintf("\n");
+    kprintf("  feat ro_compat:     0x%08x", feat_ro);
+    if (feat_ro & 1) kprintf(" (sparse_super)");
+    if (feat_ro & 2) kprintf(" (large_file)");
+    if (feat_ro & 4) kprintf(" (btree_dir)");
+    kprintf("\n");
+    kprintf("  journal inode:      %u\n", journal_inum);
+    kprintf("  desc size:          %u\n", desc_size);
+}
+
+static void sysm_journal_status(const char *mount) {
+    (void)mount;
+    extern int jbd2_have_journal(void);
+    extern uint32_t jbd2_get_maxlen(void);
+    extern uint32_t jbd2_get_first(void);
+    extern uint32_t jbd2_get_head(void);
+    extern uint32_t jbd2_get_sequence(void);
+    extern int jbd2_get_tag_bytes(void);
+    extern const uint8_t *jbd2_get_uuid(void);
+
+    if (!jbd2_have_journal()) {
+        kprintf("no journal present\n");
+        return;
+    }
+    kprintf("journal status for %s:\n", mount);
+    kprintf("  length:          %u blocks (%u MB)\n",
+            jbd2_get_maxlen(), (int)((uint64_t)jbd2_get_maxlen() * 1024 / 1048576));
+    kprintf("  first log block: %u\n", jbd2_get_first());
+    kprintf("  head (next):     %u\n", jbd2_get_head());
+    kprintf("  sequence:        %u\n", jbd2_get_sequence());
+    kprintf("  tag size:        %d bytes\n", jbd2_get_tag_bytes());
+    const uint8_t *uuid = jbd2_get_uuid();
+    kprintf("  uuid:            ");
+    for (int i = 0; i < 16; i++) kprintf("%02x", uuid[i]);
+    kprintf("\n");
+}
+
+/* pkg helpers - catalogs are split into multiple arrays */
+static const pkg_repo_t *pkg_all_repos[] = {
+    pkg_repo_core, pkg_repo_extra, pkg_repo_dev,
+    pkg_repo_ccp, pkg_repo_aur, pkg_repo_android
+};
+static int pkg_all_counts[6];
+
+static void sysm_pkg_init_counts(void) {
+    extern int pkg_core_count, pkg_extra_count, pkg_dev_count;
+    extern int pkg_ccp_count, pkg_aur_count, pkg_android_count;
+    pkg_all_counts[0] = pkg_core_count;
+    pkg_all_counts[1] = pkg_extra_count;
+    pkg_all_counts[2] = pkg_dev_count;
+    pkg_all_counts[3] = pkg_ccp_count;
+    pkg_all_counts[4] = pkg_aur_count;
+    pkg_all_counts[5] = pkg_android_count;
+}
+
+static void sysm_pkg_list(const char *filter_cat) {
+    sysm_pkg_init_counts();
+    const char *cat_names[] = {"core", "network", "dev", "ccp", "aur", "android"};
+    kprintf("Packages%s:\n", filter_cat ? " (filtered)" : "");
+    for (int r = 0; r < 6; r++) {
+        if (filter_cat && strcmp(filter_cat, cat_names[r]) != 0) continue;
+        for (int i = 0; i < pkg_all_counts[r]; i++) {
+            const pkg_repo_t *p = &pkg_all_repos[r][i];
+            if (!p || !p->name) continue;
+            kprintf("  %-32s %s  [cat:%s]\n", p->name, p->version, cat_names[r]);
+        }
+    }
+}
+
+static void sysm_pkg_deps(const char *name) {
+    sysm_pkg_init_counts();
+    for (int r = 0; r < 6; r++) {
+        for (int i = 0; i < pkg_all_counts[r]; i++) {
+            const pkg_repo_t *p = &pkg_all_repos[r][i];
+            if (!p || !p->name) continue;
+            if (strcmp(p->name, name) == 0) {
+                kprintf("Dependencies for %s:\n", name);
+                if (p->dep_count == 0) {
+                    kprintf("  (none)\n");
+                } else {
+                    for (int d = 0; d < p->dep_count; d++)
+                        kprintf("  %s\n", p->depends[d]);
+                }
+                return;
+            }
+        }
+    }
+    kprintf("pkg_deps: '%s': not found\n", name);
+}
+
+/* net helpers */
+static void sysm_net_iface(void) {
+    extern int netdev_get_count(void);
+    extern netdev_t *netdev_get_by_index(int idx);
+    int n = netdev_get_count();
+    if (n == 0) { kprintf("no network interfaces\n"); return; }
+    kprintf("network interfaces:\n");
+    kprintf("  idx  name    type  state    ip              mac\n");
+    for (int i = 0; i < n; i++) {
+        netdev_t *d = netdev_get_by_index(i);
+        if (!d || !d->name[0]) continue;
+        char ip[16] = "none", mac[18] = "none";
+        if (d->ip_addr) snprintf(ip, sizeof(ip), "%d.%d.%d.%d",
+                            (d->ip_addr>>24)&255, (d->ip_addr>>16)&255, (d->ip_addr>>8)&255, d->ip_addr&255);
+        if (d->addr[0] || d->addr[1] || d->addr[2] || d->addr[3] || d->addr[4] || d->addr[5])
+            snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                                   d->addr[0],d->addr[1],d->addr[2],d->addr[3],d->addr[4],d->addr[5]);
+        kprintf("  %2d   %-6s  %d     %s    %-15s %s\n",
+                i, d->name, d->type, (d->flags & NETDEV_UP) ? "UP  " : "DOWN", ip, mac);
+    }
+}
+
+static void sysm_net_dns(void) {
+    extern uint32_t dns_get_server(void);
+    extern const char *dns_get_server_str(void);
+    uint32_t s = dns_get_server();
+    if (s) {
+        kprintf("DNS server: %d.%d.%d.%d\n",
+                (s>>24)&255, (s>>16)&255, (s>>8)&255, s&255);
+    } else {
+        kprintf("DNS server: none configured\n");
+    }
+    const char *str = dns_get_server_str();
+    if (str && *str) kprintf("DNS server (str): %s\n", str);
+}
+
+static int sysm_net_up(const char *iface) {
+    extern int netdev_up(const char *name);
+    return netdev_up(iface);
+}
+
+static int sysm_net_down(const char *iface) {
+    extern int netdev_down(const char *name);
+    return netdev_down(iface);
+}
+
+/* simple atoi */
+static int sysm_atoi(const char *s) {
+    int n = 0, neg = 0;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9') {
+        n = n * 10 + (*s - '0');
+        s++;
+    }
+    return neg ? -n : n;
+}
+
+/* process helpers already exist: proc_kill, proc_list (via cmd_ps) */
+
+/* =====================================================================
+ * systemm builtin command
+ * ===================================================================== */
+
+static void cmd_systemm(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("usage: systemm <blk|fs|journal|ps|kill|start|pkg|net> ...\n");
+        return;
+    }
+
+    const char *sub = argv[1];
+
+    if (strcmp(sub, "blk") == 0) {
+        if (argc < 3 || strcmp(argv[2], "list") == 0) {
+            sysm_blk_list();
+            return;
+        }
+        if (strcmp(argv[2], "part") == 0 && argc >= 4) {
+            sysm_blk_part(argv[3]);
+            return;
+        }
+        kprintf("usage: systemm blk [list|part <dev>]\n");
+        return;
+    }
+
+    if (strcmp(sub, "fs") == 0) {
+        if (argc < 3 || strcmp(argv[2], "list") == 0) {
+            sysm_fs_list();
+            return;
+        }
+        if (strcmp(argv[2], "info") == 0 && argc >= 4) {
+            sysm_fs_info(argv[3]);
+            return;
+        }
+        kprintf("usage: systemm fs [list|info <mount>]\n");
+        return;
+    }
+
+    if (strcmp(sub, "journal") == 0) {
+        if (argc >= 4 && strcmp(argv[2], "status") == 0) {
+            sysm_journal_status(argv[3]);
+            return;
+        }
+        kprintf("usage: systemm journal <mount> status\n");
+        return;
+    }
+
+    if (strcmp(sub, "ps") == 0) {
+        extern void cmd_ps(void);
+        cmd_ps();
+        return;
+    }
+
+    if (strcmp(sub, "kill") == 0) {
+        if (argc < 3) {
+            kprintf("usage: systemm kill <pid> [SIG]\n");
+            return;
+        }
+        int pid = sysm_atoi(argv[2]);
+        int sig = argc >= 4 ? sysm_atoi(argv[3]) : 9;
+        extern int proc_kill(int pid, int sig);
+        int r = proc_kill(pid, sig);
+        if (r == 0) kprintf("sent signal %d to pid %d\n", sig, pid);
+        else kprintf("kill: failed (%d)\n", r);
+        return;
+    }
+
+    if (strcmp(sub, "start") == 0) {
+        if (argc < 3) {
+            kprintf("usage: systemm start <program> [args...]\n");
+            return;
+        }
+        extern void cmd_exec(int argc, char **argv);
+        cmd_exec(argc - 2, argv + 2);
+        return;
+    }
+
+    if (strcmp(sub, "pkg") == 0) {
+        if (argc < 3 || strcmp(argv[2], "list") == 0) {
+            sysm_pkg_list(argc >= 4 ? argv[3] : NULL);
+            return;
+        }
+        if (strcmp(argv[2], "deps") == 0 && argc >= 4) {
+            sysm_pkg_deps(argv[3]);
+            return;
+        }
+        kprintf("usage: systemm pkg [list [cat]|deps <name>]\n");
+        return;
+    }
+
+    if (strcmp(sub, "net") == 0) {
+        if (argc < 3 || strcmp(argv[2], "iface") == 0) {
+            sysm_net_iface();
+            return;
+        }
+        if (strcmp(argv[2], "dns") == 0) {
+            sysm_net_dns();
+            return;
+        }
+        if (strcmp(argv[2], "up") == 0 && argc >= 4) {
+            int r = sysm_net_up(argv[3]);
+            kprintf(r == 0 ? "interface %s up\n" : "net up: failed (%d)\n", argv[3], r);
+            return;
+        }
+        if (strcmp(argv[2], "down") == 0 && argc >= 4) {
+            int r = sysm_net_down(argv[3]);
+            kprintf(r == 0 ? "interface %s down\n" : "net down: failed (%d)\n", argv[3], r);
+            return;
+        }
+        kprintf("usage: systemm net [iface|dns|up|down <iface>]\n");
+        return;
+    }
+
+    kprintf("systemm: unknown subcommand: %s\n", sub);
 }

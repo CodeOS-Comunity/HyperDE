@@ -405,9 +405,50 @@ static int jbd2_txn_blocks(int ntags) {
  * start and sequence, recovery would begin at the old start expecting the old
  * sequence, meet the new epoch's higher sequence at once, and silently skip
  * every transaction written since the wrap.
+ *
+ * Because the log is erased here and the sequence restarts at 1, the live
+ * region is always one contiguous run -- [j_first, j_head) followed by zeroes
+ * -- and never straddles the wrap point.  That is why replay can be a single
+ * forward walk bounded by "the sequence stopped matching" with no wrap
+ * handling of its own, and why raising JBD2_STAGE_BLOCKS past a descriptor
+ * block's capacity is the only thing that can make it read past the live
+ * region.
  */
 static int jbd2_wrap(void) {
+    /* Erase the log before reusing it.  This is what makes wrapping recoverable
+     * at all, so it is worth being precise about why.
+     *
+     * The journal is a ring.  After a wrap, the region just past the new head
+     * holds transactions belonging to the epoch that just ended.  Replay walks
+     * forward from the oldest live transaction and stops when the sequence
+     * stops matching, which is only safe if nothing beyond the live region can
+     * pass for part of it -- and a leftover transaction can, by coincidence.
+     * The old epoch wrote sequences 1..N'; the new one has so far written 1..N.
+     * If N' > N then the stale block sitting at the new head carries a
+     * sequence the walk is about to expect, replay applies it, and a home
+     * block is overwritten with superseded content.  That is a silent revert
+     * of newer data: precisely the failure a journal exists to make impossible,
+     * and one no checksum would catch, because the transaction is internally
+     * consistent -- it is just old.
+     *
+     * Erasing removes the possibility instead of reasoning about it.  The
+     * region to erase is exactly the one just made stale, [j_first, j_head);
+     * everything past it was never written this epoch and is already zero.
+     *
+     * It is safe for the only kind of journal this driver accepts: v1, with no
+     * csum_v2 or csum_v3, so there is no checksum covering log contents that
+     * zeroing would invalidate.  This is also what the kernel does when it
+     * resets a checksum-less journal.  The cost is one write per block per
+     * wrap -- 4 MiB for a 4 MiB journal -- amortised over all the transactions
+     * that fill it, and it is the price of a wrap being able to be recovered.
+     */
+    memset(j_descbuf, 0, j_blocksize);
+    for (uint32_t b = j_first; b < j_head; b++)
+        if (jwrite(b, j_descbuf) < 0) return -1;
+
     j_head = j_first;
+    j_sequence = 1;              /* a new epoch: sequences restart at 1 */
+    j_seq_next = 1;
     return jbd2_store_sb(j_first, j_sequence);
 }
 
@@ -660,24 +701,23 @@ int jbd2_in_transaction(void) { return j_present && j_txn_depth > 0; }
  * every transaction rewrites the same bytes -- so we always replay rather than
  * maintaining the clean-shutdown checksum bookkeeping that ext3 uses to skip it.
  *
- * ── Known gap: replay does not wrap ──
+ * ── The log is a ring, and that is handled on the write side ──
  *
- * The write path calls jbd2_wrap() and the log does wrap, but replay stops at
- * j_maxlen instead of continuing at j_first.  A transaction that has wrapped
- * past the end of the log is therefore not recovered, even though it committed
- * and its home copy may not have been written.
+ * Replay is a single forward walk from the recorded start, stopping when the
+ * sequence stops matching.  It has no wrap handling of its own, and does not
+ * need one: jbd2_wrap() erases the region it makes stale and restarts the
+ * sequence at 1, so the live region is always [j_first, j_head) followed by
+ * zeroes.  The walk therefore cannot run into a leftover transaction from a
+ * previous epoch, which is the one case where a linear walk would apply
+ * superseded content to a home block.
  *
- * That cannot lose data today, and the reason is worth stating precisely
- * because it is a property of the caller rather than of this code: flush()
- * writes every home location immediately after the commit block (step 4), so
- * by the time the log has wrapped there is no committed transaction whose
- * content exists only in the journal.  Replay is re-applying bytes that are
- * already on disk.
- *
- * It becomes a real data-loss bug the moment that stops being true -- which is
- * exactly what checkpointing would do, and is the main reason checkpointing is
- * not a simple addition.  Do not read "replayed N committed transactions" as
- * "every committed transaction was replayed".
+ * Note what replay does *not* rely on: the superblock is written on wrap and on
+ * unmount, and CodeOS has no unmount, so after a crash s_start and s_sequence
+ * on disk can be stale.  That is tolerable only because the sequence the walk
+ * expects is also the sequence it finds -- both come from the same
+ * superblock, so they are wrong together rather than mismatched.  A journal
+ * whose superblock is written but whose log is not would break this, and
+ * nothing currently writes them in that order.
  */
 /* Returns 0 if a transaction was applied, 1 if the log simply ended, and -1 if
  * the log is malformed.
@@ -965,3 +1005,14 @@ void jbd2_shutdown(int clean) {
      * would otherwise hand back a second copy of the journal's block map). */
     jbd2_free_buffers();
 }
+
+/* =====================================================================
+ * Accessor functions for systemm / shell
+ * ===================================================================== */
+
+uint32_t jbd2_get_maxlen(void) { return j_maxlen; }
+uint32_t jbd2_get_first(void) { return j_first; }
+uint32_t jbd2_get_head(void) { return j_head; }
+uint32_t jbd2_get_sequence(void) { return j_sequence; }
+int jbd2_get_tag_bytes(void) { return j_tag_bytes; }
+const uint8_t *jbd2_get_uuid(void) { return j_uuid; }

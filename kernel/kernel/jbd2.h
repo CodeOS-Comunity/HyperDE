@@ -219,4 +219,12 @@ int  jbd2_peek_block(uint32_t fs_block, void *buf);
 int  jbd2_have_journal(void);
 int  jbd2_in_transaction(void);
 
+/* Accessors for systemm / shell */
+uint32_t jbd2_get_maxlen(void);
+uint32_t jbd2_get_first(void);
+uint32_t jbd2_get_head(void);
+uint32_t jbd2_get_sequence(void);
+int      jbd2_get_tag_bytes(void);
+const uint8_t *jbd2_get_uuid(void);
+
 #endif /* JBD2_H */
