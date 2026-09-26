@@ -131,7 +131,15 @@ static int read_block(uint32_t block_num) {
     return block_read_sectors(p.start_lba + sector, (uint8_t)count, block_buf);
 }
 
+/* Read a block into a caller-supplied buffer, consulting the journal first.
+ *
+ * This is read_inode_block()'s path for indirect blocks, and it needs the same
+ * staging-area lookup read_block() has.  An indirect block written earlier in
+ * this transaction is not on disk yet, so without the peek a file that grows
+ * past 12 blocks inside one transaction reads its own pointer block stale,
+ * gets 0 for every slot past the written ones, and reallocates them. */
 static int read_block_to_buf(uint32_t block_num, uint8_t *buf) {
+    if (jbd2_peek_block(block_num, buf) == 0) return 0;
     partition_t p;
     if (part_get(sb_part_idx, &p) < 0) return -1;
     uint32_t sector = (uint64_t)block_num * block_size / BLOCK_SECTOR_SIZE;
@@ -468,10 +476,109 @@ static int write_sectors(uint32_t lba, uint32_t count, const void *buf) {
 
 
 
+/* The single choke point for every filesystem block write.
+ *
+ * With a journal present the block is staged and NOT written here: the journal
+ * writes the descriptor, the data, the commit block, and only then the home
+ * location (see jbd2_flush()).  Until the transaction commits, the block's home
+ * copy is stale, which is why read_block()/read_block_to_buf() must consult
+ * jbd2_peek_block() first.
+ *
+ * jbd2_stage_block() returns non-zero when the caller must write the block
+ * itself, which is the no-journal (journalless ext2) case. */
 static int write_block(uint32_t block_num) {
+    if (jbd2_stage_block(block_num, block_buf) == 0) return 0;
     uint32_t sector = (uint64_t)block_num * block_size / BLOCK_SECTOR_SIZE;
     uint32_t count = block_size / BLOCK_SECTOR_SIZE;
     return write_sectors(sector, count, block_buf);
+}
+
+/* Transaction boundaries for the operations that must be atomic. These are
+ * no-ops returning 0 on a journalless ext2, where jbd2_txn_commit() would
+ * otherwise report failure for work that in fact succeeded.
+ *
+ * The nesting is the point: jbd2_txn_begin() only lets the outermost pair own
+ * the journal write, so ext2_write_file_path() can bracket truncate+write and
+ * ext2_write_file() can bracket its own data writes without either knowing
+ * whether it is the top-level call. */
+static int ext2_txn_begin(void) {
+    return jbd2_have_journal() ? jbd2_txn_begin() : 0;
+}
+
+static int ext2_txn_commit(void) {
+    return jbd2_have_journal() ? jbd2_txn_commit() : 0;
+}
+
+/* ── transaction boundaries ───────────────────────────────────────────────
+ *
+ * Every operation that changes more than one block has to reach the log as a
+ * unit, or a crash in the middle leaves the filesystem describing itself
+ * inconsistently: a block marked allocated in the bitmap with no inode
+ * pointing at it, a directory entry naming an inode that was never written, a
+ * freed block whose data is still referenced.  None of those are detectable as
+ * a write in progress -- each is a plausible-looking filesystem that e2fsck
+ * will eventually call corrupt.
+ *
+ * The bodies live in *_impl() functions so that the commit cannot be skipped by
+ * an early return.  Commit runs on the error paths too, and that is deliberate:
+ * an operation that fails partway has usually already staged the frees that
+ * undo its own work, and those belong in the log as well.  Leaving them staged
+ * for the next transaction to flush would be equally consistent on disk, but
+ * it would group unrelated operations into one atomic unit, which is not what
+ * a caller of unlink() asked for.
+ *
+ * Nesting is handled by jbd2 itself: only the outermost begin/commit pair owns
+ * the journal write, so ext2_write_file_path() bracketing truncate+write and
+ * ext2_write_file() bracketing its own data writes compose into one
+ * transaction without either knowing which one it is.
+ */
+static int ext2_write_file_impl(int inode_num, const void *buf, int max, int offset);
+static int ext2_write_file_path_impl(const char *path, const void *buf, int max);
+static int ext2_mkdir_impl(const char *path);
+static int ext2_creat_impl(const char *path);
+static int ext2_unlink_impl(const char *path);
+static int ext2_rmdir_impl(const char *path);
+
+int ext2_write_file(int inode_num, const void *buf, int max, int offset) {
+    if (ext2_txn_begin() < 0) return ext2_write_file_impl(inode_num, buf, max, offset);
+    int r = ext2_write_file_impl(inode_num, buf, max, offset);
+    ext2_txn_commit();
+    return r;
+}
+
+int ext2_write_file_path(const char *path, const void *buf, int max) {
+    if (ext2_txn_begin() < 0) return ext2_write_file_path_impl(path, buf, max);
+    int r = ext2_write_file_path_impl(path, buf, max);
+    ext2_txn_commit();
+    return r;
+}
+
+int ext2_mkdir(const char *path) {
+    if (ext2_txn_begin() < 0) return ext2_mkdir_impl(path);
+    int r = ext2_mkdir_impl(path);
+    ext2_txn_commit();
+    return r;
+}
+
+int ext2_creat(const char *path) {
+    if (ext2_txn_begin() < 0) return ext2_creat_impl(path);
+    int r = ext2_creat_impl(path);
+    ext2_txn_commit();
+    return r;
+}
+
+int ext2_unlink(const char *path) {
+    if (ext2_txn_begin() < 0) return ext2_unlink_impl(path);
+    int r = ext2_unlink_impl(path);
+    ext2_txn_commit();
+    return r;
+}
+
+int ext2_rmdir(const char *path) {
+    if (ext2_txn_begin() < 0) return ext2_rmdir_impl(path);
+    int r = ext2_rmdir_impl(path);
+    ext2_txn_commit();
+    return r;
 }
 
 static int write_superblock(void) {
@@ -590,9 +697,73 @@ static void free_block(uint32_t phys_block) {
     write_superblock();
 }
 
-static void free_blocks_by_inode(struct ext2_inode *inode) {
-    uint32_t ptrs_per_block = block_size / 4;
+/* Every block to free, gathered before any of them is freed.
+ *
+ * The gathering is not an optimisation, it is the fix.  free_block() works
+ * through block_buf -- it reads the group descriptor and the block bitmap into
+ * it in order to clear the bit -- so a loop that iterates an indirect block's
+ * entries out of block_buf has its buffer overwritten by the first
+ * free_block() call.  Every entry after the first is then read out of a block
+ * bitmap, handed to free_block() as a garbage block number, and the real block
+ * is leaked: still marked used, with no inode pointing at it.  That is exactly
+ * what e2fsck reports as "Block bitmap differences: -NNNN", and it is how the
+ * 8 single-indirect data blocks of the 20-block fstest file leaked on every
+ * re-run of the test.  The garbage frees are the worse direction: they mark
+ * live blocks free, so the next allocation hands out a block that is still in
+ * use. */
+typedef struct {
+    uint32_t *v;
+    uint32_t  n;
+    uint32_t  cap;
+} free_list_t;
 
+static void freelist_add(free_list_t *l, uint32_t b) {
+    if (b == 0) return;
+    if (l->n == l->cap) {
+        uint32_t cap = l->cap ? l->cap * 2 : 64;
+        uint32_t *v = (uint32_t *)realloc(l->v, (size_t)cap * sizeof(uint32_t));
+        if (!v) return;              /* leak rather than free the wrong block */
+        l->v = v;
+        l->cap = cap;
+    }
+    l->v[l->n++] = b;
+}
+
+static void freelist_release(free_list_t *l) {
+    for (uint32_t i = 0; i < l->n; i++) free_block(l->v[i]);
+    free(l->v);
+    l->v = 0;
+    l->n = 0;
+    l->cap = 0;
+}
+
+/* Append the data blocks named by the indirect block at `blk`.
+ *
+ * depth 1: entries are data blocks, so they go straight on the list.
+ * depth 2: entries are single-indirect blocks, so they go on the list too and
+ *          are then descended into.  The descent reads into inode_buf again, so
+ * it must be driven from the list (heap) and never from the buffer being
+ * iterated -- hence the second loop, and re-reading l->v[i] each time because
+ * the recursion can realloc. */
+static void collect_indirect(free_list_t *l, uint32_t blk, int depth) {
+    if (blk == 0) return;
+    if (read_block_to_buf(blk, inode_buf) < 0) return;
+
+    uint32_t ptrs = block_size / 4;
+    uint32_t *p = (uint32_t *)inode_buf;
+    uint32_t first = l->n;
+    for (uint32_t i = 0; i < ptrs; i++)
+        freelist_add(l, p[i]);
+    if (depth != 2) return;
+    for (uint32_t i = first; i < l->n; i++)
+        collect_indirect(l, l->v[i], 1);
+}
+
+static void free_blocks_by_inode(struct ext2_inode *inode) {
+    free_list_t l = { 0, 0, 0 };
+
+    /* The direct pointers live in the inode, not in a shared buffer, so these
+     * are safe to free one at a time. */
     for (int i = 0; i < 12; i++) {
         if (inode->block[i] == 0) continue;
         free_block(inode->block[i]);
@@ -600,35 +771,17 @@ static void free_blocks_by_inode(struct ext2_inode *inode) {
     }
 
     if (inode->block[12]) {
-        if (read_block(inode->block[12]) == 0) {
-            uint32_t *indir = (uint32_t *)block_buf;
-            for (uint32_t i = 0; i < ptrs_per_block; i++) {
-                if (indir[i] == 0) continue;
-                free_block(indir[i]);
-            }
-        }
-        free_block(inode->block[12]);
+        collect_indirect(&l, inode->block[12], 1);
+        freelist_add(&l, inode->block[12]);
         inode->block[12] = 0;
     }
-
     if (inode->block[13]) {
-        if (read_block(inode->block[13]) == 0) {
-            uint32_t *dindir = (uint32_t *)block_buf;
-            for (uint32_t i = 0; i < ptrs_per_block; i++) {
-                if (dindir[i] == 0) continue;
-                if (read_block(dindir[i]) == 0) {
-                    uint32_t *indir = (uint32_t *)block_buf;
-                    for (uint32_t j = 0; j < ptrs_per_block; j++) {
-                        if (indir[j] == 0) continue;
-                        free_block(indir[j]);
-                    }
-                }
-                free_block(dindir[i]);
-            }
-        }
-        free_block(inode->block[13]);
+        collect_indirect(&l, inode->block[13], 2);
+        freelist_add(&l, inode->block[13]);
         inode->block[13] = 0;
     }
+
+    freelist_release(&l);
 }
 
 int ext2_truncate(int inode_num) {
@@ -674,7 +827,7 @@ static uint32_t alloc_or_get_indir_block(uint32_t parent_block, uint32_t parent_
     return blk;
 }
 
-int ext2_write_file(int inode_num, const void *buf, int max, int offset) {
+static int ext2_write_file_impl(int inode_num, const void *buf, int max, int offset) {
     struct ext2_inode inode;
     if (ext2_read_inode(inode_num, &inode) < 0) return -1;
 
@@ -740,7 +893,7 @@ int ext2_write_file(int inode_num, const void *buf, int max, int offset) {
     return total;
 }
 
-int ext2_write_file_path(const char *path, const void *buf, int max) {
+static int ext2_write_file_path_impl(const char *path, const void *buf, int max) {
     ext2_dirent_t ent;
     if (ext2_find(path, &ent) < 0 || !ent.valid) return -1;
     if (ent.is_dir) return -1;
@@ -967,7 +1120,7 @@ static int del_dirent(int dir_inode, const char *name) {
 
 /* ── Directory operations ── */
 
-int ext2_mkdir(const char *path) {
+static int ext2_mkdir_impl(const char *path) {
     char dir_part[EXT2_NAME_MAX], name_part[EXT2_NAME_MAX];
     const char *p = path;
     while (*p == '/') p++;
@@ -1058,7 +1211,7 @@ int ext2_mkdir(const char *path) {
     return 0;
 }
 
-int ext2_creat(const char *path) {
+static int ext2_creat_impl(const char *path) {
     char dir_part[EXT2_NAME_MAX], name_part[EXT2_NAME_MAX];
 
     char tmp[EXT2_NAME_MAX];
@@ -1115,7 +1268,7 @@ int ext2_creat(const char *path) {
     return inode_num;
 }
 
-int ext2_unlink(const char *path) {
+static int ext2_unlink_impl(const char *path) {
     ext2_dirent_t ent;
     if (ext2_find(path, &ent) < 0 || !ent.valid) return -1;
     if (ent.is_dir) return -1;
@@ -1160,7 +1313,7 @@ int ext2_unlink(const char *path) {
     return 0;
 }
 
-int ext2_rmdir(const char *path) {
+static int ext2_rmdir_impl(const char *path) {
     ext2_dirent_t ent;
     if (ext2_find(path, &ent) < 0 || !ent.valid) return -1;
     if (!ent.is_dir) return -1;
