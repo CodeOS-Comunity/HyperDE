@@ -301,6 +301,20 @@ static int64_t gated_kill(int pid, int sig) {
     return proc_kill(pid, sig);
 }
 
+/* level_gate returns 0 if the caller may perform an operation that
+ * creates or manages objects at required_level, or -EPERM if not.
+ * A caller with no process_t (kernel context, e.g. waydroid, the
+ * android session, VM boot) has full authority — those paths set
+ * current_process to NULL deliberately and are trusted.  This keeps
+ * the gate from breaking the only callers of container_create() and
+ * vm_create() that are not already gated elsewhere. */
+static int level_gate(int required_level) {
+    int actor = systemm_caller_level();
+    if (actor < 0) return 0;
+    if (actor < required_level) return -LINUX_EPERM;
+    return 0;
+}
+
 /* Terminal line discipline. The serial input path has always been canonical:
  * sys_read() on fd 0 spins until a full line (up to \n or \r) has arrived,
  * which is what the shell wants. A process can now opt out per-keypress by
@@ -2180,8 +2194,10 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
     }
 
     case SYSCALL_CONTAINER_CREATE:
+        if (int r = level_gate(LEVEL_KERNEL); r) return r;
         return container_create((const char *)a1, (const char *)a2);
     case SYSCALL_CONTAINER_START:
+        if (int r = level_gate(LEVEL_KERNEL); r) return r;
         return container_start((int)a1);
     case SYSCALL_CONTAINER_EXEC: {
         int id = (int)a1;
@@ -2221,6 +2237,7 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
         return ret;
     }
     case SYSCALL_CONTAINER_DESTROY:
+        if (int r = level_gate(LEVEL_KERNEL); r) return r;
         return container_destroy((int)a1);
     case SYSCALL_CONTAINER_LIST: {
         char names[CONTAINER_MAX][CONTAINER_NAME_MAX];
@@ -2565,11 +2582,13 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
             return n;
         }
         case VM_CMD_CREATE: {
+            if (int r = level_gate(LEVEL_KERNEL); r) return r;
             vm_config_t cfg;
             if (copy_from_user(&cfg, (uint64_t)str, sizeof(cfg)) < 0) return -1;
             return vm_create(&cfg);
         }
         case VM_CMD_START: {
+            if (int r = level_gate(LEVEL_KERNEL); r) return r;
             char name[VM_NAME_MAX];
             if (copy_from_user(name, (uint64_t)str, VM_NAME_MAX - 1) < 0) return -1;
             name[VM_NAME_MAX - 1] = 0;
@@ -2578,6 +2597,7 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
             return vm_start(vm->id);
         }
         case VM_CMD_STOP: {
+            if (int r = level_gate(LEVEL_KERNEL); r) return r;
             char name[VM_NAME_MAX];
             if (copy_from_user(name, (uint64_t)str, VM_NAME_MAX - 1) < 0) return -1;
             name[VM_NAME_MAX - 1] = 0;
@@ -2586,6 +2606,7 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
             return vm_stop(vm->id);
         }
         case VM_CMD_DESTROY: {
+            if (int r = level_gate(LEVEL_KERNEL); r) return r;
             char name[VM_NAME_MAX];
             if (copy_from_user(name, (uint64_t)str, VM_NAME_MAX - 1) < 0) return -1;
             name[VM_NAME_MAX - 1] = 0;
@@ -2594,6 +2615,7 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
             return vm_destroy(vm->id);
         }
         case VM_CMD_PAUSE: {
+            if (int r = level_gate(LEVEL_KERNEL); r) return r;
             char name[VM_NAME_MAX];
             if (copy_from_user(name, (uint64_t)str, VM_NAME_MAX - 1) < 0) return -1;
             name[VM_NAME_MAX - 1] = 0;
@@ -2602,6 +2624,7 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
             return vm_pause(vm->id);
         }
         case VM_CMD_RESUME: {
+            if (int r = level_gate(LEVEL_KERNEL); r) return r;
             char name[VM_NAME_MAX];
             if (copy_from_user(name, (uint64_t)str, VM_NAME_MAX - 1) < 0) return -1;
             name[VM_NAME_MAX - 1] = 0;
@@ -2701,10 +2724,12 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
             return 0;
         }
         case VM_CMD_CONTAINER_START: {
+            if (int r = level_gate(LEVEL_KERNEL); r) return r;
             /* a2 = container_id — launch with console I/O bridge */
             return container_launch_console((int)a2);
         }
         case VM_CMD_CONTAINER_STOP: {
+            if (int r = level_gate(LEVEL_KERNEL); r) return r;
             /* a2 = container_id */
             return container_stop((int)a2);
         }
