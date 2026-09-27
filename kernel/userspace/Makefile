@@ -77,7 +77,7 @@ LIB_ANDROID = lib/android.o lib/android_ui.o
 # Programs that only need core libs
 CORE_PROGS = init shell csl zircon-notify zircon-clock zircon-info \
              code-music linux-runner syscall_test crosvm-launcher ncvm android-apps \
-             wineserver wine-runner run-as dnslookup
+             wineserver wine-runner run-as dnslookup leveltest
 # Programs that also need android lib
 ANDROID_PROGS = apk-parser android-container android-launcher \
                 android-clock android-calculator android-settings \

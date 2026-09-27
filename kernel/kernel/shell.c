@@ -42,6 +42,7 @@
 #include "ad_block.h"
 #include "version.h"
 #include "process.h"
+#include "systemm.h"
 #include "netdev.h"
 static void run_builtin(int argc, char **argv);
 static int str_to_int(const char *s);
@@ -49,20 +50,10 @@ extern void cmd_waydroid(int argc, char **argv);
 static void cmd_systemm(int argc, char **argv);
 
 /* Shell's own security level (default user).
- * systemm task commands enforce this as the caller's level. */
+ * systemm task commands enforce this as the caller's level.  Level names come
+ * from systemm_level_name() -- the name table lives in systemm.c with the rest
+ * of the authority, so there is exactly one of them. */
 proc_level_t shell_level = LEVEL_USER;
-
-/* Human-readable name for a security level, for the systemm task output.
- * Kept next to shell_level because that is what the levels are relative to. */
-static const char *level_name(proc_level_t lvl) {
-    switch (lvl) {
-        case LEVEL_CONTAINER: return "container";
-        case LEVEL_OS:        return "os";
-        case LEVEL_USER:      return "user";
-        case LEVEL_KERNEL:    return "kernel";
-        default:              return "?";
-    }
-}
 
 #define CMD_BUF_SIZE 256
 #define MAX_ARGS     32
@@ -4752,10 +4743,13 @@ static void cmd_systemm(int argc, char **argv) {
         }
         int pid = sysm_atoi(argv[2]);
         int sig = argc >= 4 ? sysm_atoi(argv[3]) : 9;
-        extern int proc_kill(int pid, int sig);
-        int r = proc_kill(pid, sig);
+        /* Same path the kill syscall takes, so the two cannot disagree. */
+        int r = systemm_kill(shell_level, pid, sig);
         if (r == 0) kprintf("sent signal %d to pid %d\n", sig, pid);
-        else kprintf("kill: failed (%d)\n", r);
+        else if (systemm_level_of(pid) < 0) kprintf("kill: no task with pid %d\n", pid);
+        else kprintf("kill: refused, level %d (%s) may not signal a task at level %d (%s)\n",
+                     (int)shell_level, systemm_level_name(shell_level),
+                     systemm_level_of(pid), systemm_level_name(systemm_level_of(pid)));
         return;
     }
 
@@ -4784,63 +4778,70 @@ static void cmd_systemm(int argc, char **argv) {
 
         if (strcmp(tsub, "info") == 0 && argc >= 4) {
             int pid = sysm_atoi(argv[3]);
-            if (!proc_exists(pid)) {
+            int lvl = systemm_level_of(pid);
+            if (lvl < 0) {
                 kprintf("task info: no task with pid %d\n", pid);
                 return;
             }
             char name[PROC_NAME_MAX] = "?";
             proc_get_pid_name(pid, name, sizeof(name));
             kprintf("task %d: %s (level %d, %s)\n", pid, name,
-                    (int)proc_get_level(pid), level_name(proc_get_level(pid)));
+                    lvl, systemm_level_name(lvl));
+            return;
+        }
+
+        if (strcmp(tsub, "level") == 0 && argc >= 4) {
+            /* Raw level for scripting: prints just the number, 0..3, and
+             * nothing else, so `systemm task level <pid>` can be tested
+             * without parsing prose.  Exit status is not meaningful here --
+             * the shell has none -- so "no such task" is -1 on stdout. */
+            int pid = sysm_atoi(argv[3]);
+            int lvl = systemm_level_of(pid);
+            kprintf("%d\n", lvl);
             return;
         }
 
         if (strcmp(tsub, "set") == 0 && argc >= 5) {
             int pid = sysm_atoi(argv[3]);
             int lvl = sysm_atoi(argv[4]);
-            if (!proc_exists(pid)) {
+            if (systemm_level_of(pid) < 0) {
                 kprintf("task set: no task with pid %d\n", pid);
                 return;
             }
-            if (lvl < 0 || lvl > LEVEL_KERNEL) {
-                kprintf("task set: level must be 0..3\n");
+            /* systemm_set_level() owns the no-promotion rule, so the shell
+             * and the syscall path cannot drift apart on it. */
+            if (systemm_set_level(shell_level, pid, lvl) < 0) {
+                if (lvl < 0 || lvl > LEVEL_KERNEL)
+                    kprintf("task set: level must be 0..3\n");
+                else
+                    kprintf("task set: level %d (%s) may not re-level a task to level %d (%s)\n",
+                            (int)shell_level, systemm_level_name(shell_level),
+                            lvl, systemm_level_name(lvl));
                 return;
             }
-            /* Never a promotion: a task may be re-levelled to anything at or
-             * below the caller's own level, never above it.  Same rule as
-             * `task run`, and the reason `--level 3` is refused from the
-             * level-2 shell. */
-            if (lvl > shell_level) {
-                kprintf("task set: level %d (%s) may not promote a task to level %d (%s)\n",
-                        shell_level, level_name(shell_level), lvl, level_name((proc_level_t)lvl));
-                return;
-            }
-            if (proc_set_level(pid, (proc_level_t)lvl) < 0)
-                kprintf("task set: pid %d: failed\n", pid);
-            else
-                kprintf("task %d: level set to %d (%s)\n", pid, lvl,
-                        level_name((proc_level_t)lvl));
+            kprintf("task %d: level set to %d (%s)\n", pid, lvl,
+                    systemm_level_name(lvl));
             return;
         }
 
         if (strcmp(tsub, "kill") == 0 && argc >= 4) {
             int pid = sysm_atoi(argv[3]);
             int sig = argc >= 5 ? sysm_atoi(argv[4]) : 9;
-            if (!proc_exists(pid)) {
+            int lvl = systemm_level_of(pid);
+            if (lvl < 0) {
                 kprintf("task kill: no task with pid %d\n", pid);
                 return;
             }
-            if (!proc_can_interfere(shell_level, pid)) {
-                kprintf("task kill: level %d (%s) may not signal task %d at level %d (%s)\n",
-                        shell_level, level_name(shell_level), pid,
-                        (int)proc_get_level(pid), level_name(proc_get_level(pid)));
-                return;
-            }
-            int r = proc_kill(pid, sig);
-            if (r == 0)
+            int r = systemm_kill(shell_level, pid, sig);
+            if (r == 0) {
                 kprintf("sent signal %d to task %d\n", sig, pid);
-            else
+            } else if (!systemm_may_act(shell_level, pid)) {
+                kprintf("task kill: level %d (%s) may not signal task %d at level %d (%s)\n",
+                        (int)shell_level, systemm_level_name(shell_level), pid,
+                        lvl, systemm_level_name(lvl));
+            } else {
                 kprintf("task kill: pid %d: failed (rc=%d)\n", pid, r);
+            }
             return;
         }
 
@@ -4868,7 +4869,8 @@ static void cmd_systemm(int argc, char **argv) {
              * privilege escalation out of the level-2 shell. */
             if (lvl > shell_level) {
                 kprintf("task run: level %d (%s) may not start a task at level %d (%s)\n",
-                        shell_level, level_name(shell_level), (int)lvl, level_name(lvl));
+                        (int)shell_level, systemm_level_name(shell_level),
+                        (int)lvl, systemm_level_name(lvl));
                 return;
             }
             int targc = argc - argi;

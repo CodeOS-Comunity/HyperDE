@@ -176,10 +176,14 @@ extern process_t *current_process;
 extern process_t proc_table[PROC_MAX];
 extern int next_pid;
 
-/* ── Task / security levels ── */
+/* ── Task / security levels ──
+ * These are the raw accessors: read a level, set a level.  They do not
+ * enforce anything.  The rule for who may act on whom, and the code that
+ * enforces it, is in systemm.h -- the shell builtin and the kill/tkill/tgkill
+ * syscalls all go through there so there is one implementation.  Do not add a
+ * second authorization check here. */
 int  proc_set_level(int pid, proc_level_t level);
 proc_level_t proc_get_level(int pid);
-int  proc_can_interfere(int killer_level, int target_pid);
 int  proc_list(void);
 int  proc_exists(int pid);
 int  proc_get_pid_name(int pid, char *buf, int len);

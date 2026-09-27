@@ -550,54 +550,12 @@ proc_level_t proc_get_level(int pid) {
             return proc_table[i].level;
     }
     /* Unreachable pid.  Report LEVEL_KERNEL rather than LEVEL_CONTAINER: the
-     * authorization check in proc_can_interfere() must not hand out a low
-     * level for a pid that does not exist, or `kill <any number>` would
-     * always be permitted.  Denying is the safe direction. */
+     * authorization check must never be handed a low level for a pid that
+     * does not exist, or `kill <any number>` would always be permitted.
+     * Denying is the safe direction.  systemm_level_of() checks existence
+     * separately and reports -1, so this fallback is only reached by callers
+     * that did not. */
     return LEVEL_KERNEL;
-}
-
-/* Can a task at killer_level interfere with (signal/kill) the task
- * at target_pid?  A task may act on anything at or below its own level,
- * and never on anything above.  This keeps level-3 kernel apps safe from
- * every lower level, and keeps a level-2 shell from reaching the level-3
- * processes that make up the window protocol and the android containers.
- *
- * An unreachable pid is denied: proc_get_level() reports LEVEL_KERNEL for a
- * pid that does not exist, so "not found" can never be mistaken for a
- * low-privilege target that just happens to be free to kill. */
-int proc_can_interfere(int killer_level, int target_pid) {
-    if (killer_level < LEVEL_CONTAINER || killer_level > LEVEL_KERNEL) return 0;
-    if (!proc_exists(target_pid)) return 0;
-    return killer_level >= proc_get_level(target_pid);
-}
-
-/* Iterate the process table and print every live task with its level.
- * Returns the count of live tasks. */
-int proc_list(void) {
-    int n = 0;
-    static const char *const lvl_name[] = { "container", "os", "user", "kernel" };
-    kprintf("  PID  NAME                   STATE      LEVEL\n");
-    for (int i = 0; i < PROC_MAX; i++) {
-        process_t *p = &proc_table[i];
-        if (p->state == PROC_DEAD || p->state == 0) continue;
-        const char *st;
-        switch (p->state) {
-            case PROC_CREATED: st = "created"; break;
-            case PROC_READY:   st = "ready";   break;
-            case PROC_RUNNING: st = "running"; break;
-            case PROC_SLEEPING:st = "sleeping";break;
-            case PROC_ZOMBIE:  st = "zombie";  break;
-            default:           st = "?";       break;
-        }
-        /* A level is 4 enum values; index defensively so a corrupt table
-         * cannot walk off the end of lvl_name. */
-        int lv = (int)p->level;
-        const char *lvn = (lv >= 0 && lv <= LEVEL_KERNEL) ? lvl_name[lv] : "?";
-        kprintf("  %4d %-22s %-10s %d %s\n", p->pid, p->name, st, lv, lvn);
-        n++;
-    }
-    if (n == 0) kprintf("  (no tasks)\n");
-    return n;
 }
 
 /* Does a live task with this pid exist?  Needed to tell "no such task" apart

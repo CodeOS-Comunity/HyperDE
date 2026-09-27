@@ -320,14 +320,23 @@ int container_start(int id) {
 
     /* Prefer a dedicated process for pid-1 (fresh address space, safe from
      * any enclosing user session). Fall back to the shared-process path only
-     * when called from inside a user syscall. */
+     * when called from inside a user syscall.
+     *
+     * A process created inside a container is LEVEL_CONTAINER whatever asked
+     * for it.  The callers here are waydroid, the android session and VM
+     * boot, all of which are kernel code with no process_t of their own, so
+     * none of them needs a level assigned -- only the payload does, and a
+     * container payload is the untrusted environment by definition.  Giving
+     * it the caller's level instead would mean a level-2 user could obtain a
+     * level-2 process inside a container and the containment would mean
+     * nothing. */
     process_t *proc = proc_current();
     int host_mode = (proc != 0);
     uint64_t rsp;
     if (!proc) {
         rsp = elf_setup_stack(stack, entry, 1, init_argv, 0, 0, &auxv);
         if (!rsp) return -1;
-        proc_create(full_path, entry, stack, LEVEL_USER);
+        proc_create(full_path, entry, stack, LEVEL_CONTAINER);
         proc = proc_current();
         if (!proc) return -1;
     } else {
@@ -551,7 +560,9 @@ int container_exec(int id, const char *path, int argc, char **argv, char **envp)
     if (!cur) {
         rsp = elf_setup_stack(stack, entry, argc, argv, envc, envp, &auxv);
         if (!rsp) return -1;
-        proc_create(full_path, entry, stack, LEVEL_USER);
+        /* LEVEL_CONTAINER, as in container_exec_init above: this is the
+         * payload of a container, not a kernel-side service. */
+        proc_create(full_path, entry, stack, LEVEL_CONTAINER);
         cur = proc_current();
         if (!cur) return -1;
     } else {

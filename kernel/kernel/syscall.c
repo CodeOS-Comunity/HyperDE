@@ -28,6 +28,7 @@
 #include "ai.h"
 #include "apphost.h"
 #include "user_wm.h"
+#include "systemm.h"
 #include "ow_http.h"
 #include "socket.h"
 #include "../arch/x86_64/fb.h"
@@ -191,6 +192,7 @@ static void ltx_kernel_to_addr(const sockaddr_t *ks, uint8_t *uaddr) {
 /* Linux errno values returned as negative from syscalls */
 #define LINUX_EPERM    1
 #define LINUX_ENOENT   2
+#define LINUX_ESRCH    3
 #define LINUX_EIO      5
 #define LINUX_ENOMEM   12
 #define LINUX_EACCES   13
@@ -271,6 +273,29 @@ static int fd_verify(int fd) {
 }
 
 #define FD_CHECK(fd) do { if (!fd_verify(fd)) return -LINUX_EINVAL; } while(0)
+
+/* ── Level-gated signalling ──
+ * Every syscall that acts on another task funnels through here, so systemm
+ * is the only thing that decides whether the call is allowed.  Routing
+ * through the `systemm` shell builtin is not what enforces the level rule --
+ * it is enforced here, where a program cannot avoid it.  Before this existed
+ * a program could call kill(2) directly and skip the check entirely.
+ *
+ * The caller's level comes from current_process, not from a syscall argument,
+ * so it cannot be forged by the caller.
+ *
+ * A task may act on anything at or below its own level, which includes its
+ * own level, so kill(getpid(), SIGKILL) still works: systemm_may_act()
+ * compares with >= and proc_kill() handles the self case. */
+static int64_t gated_kill(int pid, int sig) {
+    if (pid <= 0) return -LINUX_EINVAL;
+    /* systemm_level_of() is -1 for a pid that is not a live task, which is
+     * ESRCH rather than a permission problem -- the two are different
+     * answers and a caller may act on them differently. */
+    if (systemm_level_of(pid) < 0) return -LINUX_ESRCH;
+    if (!systemm_caller_may_act(pid)) return -LINUX_EPERM;
+    return proc_kill(pid, sig);
+}
 
 /* Terminal line discipline. The serial input path has always been canonical:
  * sys_read() on fd 0 spins until a full line (up to \n or \r) has arrived,
@@ -1472,14 +1497,26 @@ int64_t linux_syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
     case LINUX_KILL: {
         int pid = (int)a1;
         int sig = (int)a2;
-        return proc_kill(pid, sig);
+        return gated_kill(pid, sig);
     }
     /* ── TGKILL (234) ── */
     case LINUX_TGKILL: {
-        /* tgkill(tgid, tid, sig) */
-        int pid = (int)a2;
-        int sig = (int)a3;
-        return proc_kill(pid, sig);
+        /* tgkill(tgid, tid, sig).  A zero tgid or tid means "the caller's",
+         * so tgkill(0, 0, sig) is how a thread signals itself.  Resolving
+         * that to the caller's pid is what keeps self-signalling working now
+         * that the target goes through the level check -- a task may always
+         * act on its own level, so this is permitted, but only if the pid is
+         * a real one rather than the 0 that gated_kill() rejects. */
+        int tgid = (int)a1;
+        int tid  = (int)a2;
+        int sig  = (int)a3;
+        int pid  = tid ? tid : tgid;
+        if (pid == 0) {
+            process_t *me = proc_current();
+            if (!me) return -LINUX_ESRCH;
+            pid = me->pid;
+        }
+        return gated_kill(pid, sig);
     }
     /* ── GETPPID (64) ── */
     case LINUX_GETPPID:
@@ -2518,7 +2555,7 @@ int64_t syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
     case SYSCALL_KILL: {
         int pid = (int)a1;
         int sig = (int)a2;
-        return proc_kill(pid, sig);
+        return gated_kill(pid, sig);
     }
     case SYSCALL_VM: {
         int cmd = (int)a1;

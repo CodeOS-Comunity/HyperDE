@@ -408,8 +408,11 @@ void zircon_launch_elf(const char *path) {
     uint64_t rsp = elf_setup_stack(stack, entry, 1, argv, 0, 0, &auxv);
     kprintf("zircon: launching '%s' entry=0x%lx rsp=0x%lx\n", path, entry, rsp);
 
-    /* Create process so syscalls (brk, mmap, exit) work */
-    proc_create(path, entry, stack, LEVEL_USER);
+    /* Create process so syscalls (brk, mmap, exit) work.
+     * Level 3 (kernel app): Zircon brings its own init and compositor and
+     * runs as a co-equal OS on top of this kernel, not as an ordinary
+     * program, so it sits at the same level as the window protocol. */
+    proc_create(path, entry, stack, LEVEL_KERNEL);
 
     user_mode_set_return(shell_exec_done);
     user_mode_begin();
