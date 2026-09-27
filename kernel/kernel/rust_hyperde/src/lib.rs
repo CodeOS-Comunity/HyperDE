@@ -725,12 +725,12 @@ unsafe fn render_bar(buf: *mut u32, stride: u32, w: u32, h: u32) {
 
 /* ───────────────────── window compositor ─────────────────────
  * HyperDE owns the window chrome: for every visible WM window it
- * composites a COSMIC-style title band (rounded, glass), centered
- * title, window controls on the RIGHT of the band and a focus
+ * composites a macOS title band (rounded, glass), traffic-light
+ * controls on the LEFT of the band, a left-aligned title and a focus
  * accent in the accent color, over whatever Qt painted. Qt stays
  * in charge of the window content area and input; this layer simply
  * re-skins the decorations so the compositor and the panel read as
- * one COSMIC slab.
+ * one slab.
  */
 
 const WIN_TB: i64 = 30; /* title band height (matches QtAppWindow tb) */
@@ -809,7 +809,8 @@ unsafe fn render_windows(buf: *mut u32, stride: u32, w: u32, h: u32) {
 /* macOS-style chrome for one window body, shared by the lvgl/Qt pass and
  * the X11/GNUstep pass so both window families look identical: layered
  * drop shadow, glass title band with rounded top corners + specular edge,
- * COSMIC traffic-light controls, centered title, accent focus ring. */
+ * macOS traffic-light controls on the left, left-aligned title, accent
+ * focus ring. */
 unsafe fn draw_window_chrome(
     buf: *mut u32, stride: u32, w: u32, h: u32,
     rx: i64, ry: i64, rw: i64, rh: i64,
@@ -864,27 +865,36 @@ unsafe fn draw_window_chrome(
         }
     }
 
-    /* window controls on the RIGHT of the band (COSMIC style) */
+    /* Window controls on the LEFT of the band, in macOS order -- close,
+     * minimize, zoom, left to right.  This is the single most recognisable
+     * thing about a macOS window; the COSMIC arrangement (close rightmost)
+     * is exactly what made these read as Linux windows.  Unfocused windows
+     * go grey, which is also macOS: the colour is the only cue that the
+     * window is live. */
     let dot_y = by0 + (WIN_TB - 12) / 2;
     let gap = 20i64;
-    let close_x = rx + rw - WIN_SH - 18; /* rightmost = close */
+    let close_x = x0 + 14; /* leftmost = close */
     let (dc, dm, dx) = if focused {
         (CLOSE_DOT, MIN_DOT, MAX_DOT)
     } else {
         (0x005A5A5E, 0x005A5A5E, 0x005A5A5E)
     };
     fill_circle(buf, stride, w, h, close_x, dot_y + 6, 6, dc, 0xFF);
-    fill_circle(buf, stride, w, h, close_x - gap, dot_y + 6, 6, dm, 0xFF);
-    fill_circle(buf, stride, w, h, close_x - gap * 2, dot_y + 6, 6, dx, 0xFF);
+    fill_circle(buf, stride, w, h, close_x + gap, dot_y + 6, 6, dm, 0xFF);
+    fill_circle(buf, stride, w, h, close_x + gap * 2, dot_y + 6, 6, dx, 0xFF);
 
-    /* centered title between the left inset and the controls */
-    let tw = title.len() as i64 * 10;
-    let tcx = (x0 + close_x - gap * 2) / 2;
+    /* Title left-aligned just past the lights, as macOS does.  Clamped to
+     * the band so a long window name cannot run off the right edge -- the
+     * centred layout had the same overflow but a centred title that
+     * overflows hides the title's start, which is worse. */
+    let tx = close_x + gap * 2 + 16;
+    let room = if x1 - tx > 0 { (x1 - tx) / 10 } else { 0 };
+    let n = core::cmp::min(title.len() as i64, room) as usize;
     draw_text(
         buf, stride, w, h,
-        tcx - tw / 2,
+        tx,
         by0 + (WIN_TB - 8) / 2 - 1,
-        title,
+        &title[..n],
         if focused { pal().text } else { pal().sub },
         1, 0xFF,
     );
