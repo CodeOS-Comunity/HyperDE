@@ -846,17 +846,6 @@ int vm_get_state(int vm_id) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * VM exec
- * ══════════════════════════════════════════════════════════════════════════════ */
-
-int vm_exec(int vm_id, const char *path, int argc, char **argv, char **envp) {
-    vm_t *vm = vm_get(vm_id);
-    if (!vm) return -1;
-    if (vm->state != VM_STATE_RUNNING) return -1;
-    return container_exec(vm->container_id, path, argc, argv, envp);
-}
-
-/* ══════════════════════════════════════════════════════════════════════════════
  * VM info / inspect
  * ══════════════════════════════════════════════════════════════════════════════ */
 
