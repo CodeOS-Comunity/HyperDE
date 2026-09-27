@@ -89,7 +89,7 @@ def log(msg):
 
 # ───────────────────────────── image construction ─────────────────────────────
 
-def build_image(disk, fstype, populate=True, journal_csum=None):
+def build_image(disk, fstype, populate=True, journal_csum=None, journal_kb=None):
     """Create a partitioned disk with a freshly-mkfs'd filesystem inside it.
 
     journal_csum, when set, rewrites the journal superblock afterwards to
@@ -97,7 +97,18 @@ def build_image(disk, fstype, populate=True, journal_csum=None):
     host cannot do it itself: its /etc/mke2fs.conf has no [journal] section, and
     this build ignores MKE2FS_CONFIG, so `mke2fs -t ext3` can only ever produce
     a v1 journal with s_feature_incompat == 0.
+
+    journal_kb, when set, passes -J size=<journal_kb/1024> to mke2fs so the
+    journal is that many kilobytes.  A small journal exercises the JBD2
+    ring-wrap path (the journal tail reaches the end of the journal buffer
+    and wraps back) much sooner than the default 4MB journal, where
+    jmaxlen=4096 blocks.  The value must be a multiple of 1024 and at
+    least 1024 (mke2fs floor: 1024 filesystem blocks = 1MB with -b 1024).
     """
+    if journal_kb is not None:
+        if journal_kb < 1024 or journal_kb % 1024 != 0:
+            log(f"journal_kb must be a multiple of 1024 and >= 1024, got {journal_kb}")
+            return False
     if os.path.exists(disk):
         os.remove(disk)
     subprocess.run(["truncate", "-s", f"{DISK_SIZE_M}M", disk], check=True)
@@ -120,6 +131,8 @@ def build_image(disk, fstype, populate=True, journal_csum=None):
 
     cmd = ["mke2fs", "-q", "-t", fstype, "-F", "-L", "codeosfs",
            "-b", "1024", "-I", "128", "-E", f"offset={PART_OFFSET}"]
+    if journal_kb is not None:
+        cmd += ["-J", f"size={journal_kb // 1024}"]
     if populate:
         cmd += ["-d", stage]
     cmd.append(disk)
@@ -1145,7 +1158,7 @@ def journal_recovery_restore(part):
 
 # ───────────────────────────── the test itself ─────────────────────────────
 
-def run(fstype, keep, journal_csum=None):
+def run(fstype, keep, journal_csum=None, journal_kb=None):
     os.makedirs(WORK, exist_ok=True)
     disk = os.path.join(WORK, f"disk-{fstype}.img")
     part = os.path.join(WORK, f"part-{fstype}.img")
@@ -1181,12 +1194,13 @@ def run(fstype, keep, journal_csum=None):
              f"built with this function, so a mismatch invalidates this run")
 
     log(f"=== building {fstype} image ===")
-    if not build_image(disk, fstype, journal_csum=journal_csum):
+    if not build_image(disk, fstype, journal_csum=journal_csum, journal_kb=journal_kb):
         lines.append("mke2fs FAILED")
         open(report, "w").write("\n".join(lines))
         return False
     step(True, f"built {DISK_SIZE_M}M disk with {fstype}"
-               + (f" + journal {journal_csum}" if journal_csum else ""))
+               + (f" + journal {journal_csum}" if journal_csum else "")
+               + (f" journal={journal_kb}KB" if journal_kb else ""))
 
     # Confirm the image really is what we think it is, before blaming the kernel.
     rc, out = fsck(extract_partition(disk, part) and part)
@@ -1366,6 +1380,11 @@ def main():
                     choices=["ext2", "ext3", "ext4"])
     ap.add_argument("--keep", action="store_true",
                     help="keep the disk image for inspection")
+    ap.add_argument("--journal-kb", type=int, default=None,
+                    help="journal size in kilobytes (passed as -J size=N "
+                         "to mke2fs).  A small journal exercises the JBD2 "
+                         "ring-wrap path sooner than the default 4MB.  "
+                         "Must be a multiple of 1024 and >= 1024.")
     ap.add_argument("--journal-csum", default=None,
                     choices=["v2", "v3", "v2+64bit"],
                     help="build the journal superblock to advertise a "
@@ -1380,7 +1399,10 @@ def main():
     if args.journal_csum and args.fstype == "ext2":
         log("ext2 has no journal; --journal-csum would test nothing")
         return 2
-    return 0 if run(args.fstype, args.keep, args.journal_csum) else 1
+    if args.journal_kb and args.fstype == "ext2":
+        log("ext2 has no journal; --journal-kb would test nothing")
+        return 2
+    return 0 if run(args.fstype, args.keep, args.journal_csum, args.journal_kb) else 1
 
 
 if __name__ == "__main__":
