@@ -23,6 +23,12 @@ Usage
     ./fs_test.py --fstype ext3          # build image, boot, exercise, verify
     ./fs_test.py --fstype ext2          # same, for comparison
     ./fs_test.py --fstype ext3 --keep   # leave the image in place afterwards
+    ./fs_test.py --fstype ext3 --journal-csum v2
+        # same, on a journal with CRC32C checksums (csum_v2 / csum_v3 /
+        # csum_v2+64bit).  mke2fs on this host cannot build one, so the
+        # journal superblock is rewritten here and e2fsprogs is left to judge
+        # the result; jbd2_csum_ref.py is the standalone oracle for the
+        # checksums themselves.
 """
 
 import argparse
@@ -83,8 +89,15 @@ def log(msg):
 
 # ───────────────────────────── image construction ─────────────────────────────
 
-def build_image(disk, fstype, populate=True):
-    """Create a partitioned disk with a freshly-mkfs'd filesystem inside it."""
+def build_image(disk, fstype, populate=True, journal_csum=None):
+    """Create a partitioned disk with a freshly-mkfs'd filesystem inside it.
+
+    journal_csum, when set, rewrites the journal superblock afterwards to
+    advertise a checksummed journal (see enable_journal_csum).  mke2fs on this
+    host cannot do it itself: its /etc/mke2fs.conf has no [journal] section, and
+    this build ignores MKE2FS_CONFIG, so `mke2fs -t ext3` can only ever produce
+    a v1 journal with s_feature_incompat == 0.
+    """
     if os.path.exists(disk):
         os.remove(disk)
     subprocess.run(["truncate", "-s", f"{DISK_SIZE_M}M", disk], check=True)
@@ -114,6 +127,26 @@ def build_image(disk, fstype, populate=True):
     if r.returncode != 0:
         log("mke2fs failed:\n" + r.stdout + r.stderr)
         return False
+
+    if journal_csum:
+        # The filesystem lives at PART_OFFSET inside the disk image, and
+        # e2fsprogs can only read a filesystem at offset 0 -- so the patch is
+        # made on a carved-out copy and written back over the same range.
+        scratch = os.path.join(WORK, "stage-csum.img")
+        extract_partition(disk, scratch)
+        try:
+            enable_journal_csum(scratch, journal_csum)
+        except Exception as exc:
+            log(f"could not enable journal {journal_csum}: {exc}")
+            return False
+        with open(disk, "r+b") as fd, open(scratch, "rb") as src:
+            fd.seek(PART_OFFSET)
+            while True:
+                chunk = src.read(1 << 20)
+                if not chunk:
+                    break
+                fd.write(chunk)
+        os.unlink(scratch)
     return True
 
 
@@ -306,6 +339,19 @@ JBD2_INCOMPAT_64BIT    = 0x2
 JBD2_INCOMPAT_ASYNC    = 0x4
 JBD2_INCOMPAT_CSUM_V2  = 0x8
 JBD2_INCOMPAT_CSUM_V3  = 0x10
+
+# journal block types (include/linux/jbd2.h).  Only a few of these ever appear
+# in a log this driver writes, but the reader still has to know them: a
+# superblock or revoke block between a transaction's data blocks and its commit
+# block is legal, and misreading one as data throws the walk off by a block --
+# which then reports every later checksum as wrong.
+JBD2_DESCRIPTOR         = 1
+JBD2_COMMIT             = 2
+JBD2_SUPERBLOCK_V1      = 3
+JBD2_SUPERBLOCK_V2      = 4
+JBD2_REVOKE             = 5
+JBD2_FAST_COMMIT        = 6
+
 JBD2_FLAG_ESCAPE       = 0x1
 JBD2_FLAG_SAME_UUID    = 0x2
 JBD2_FLAG_DELETED      = 0x4
@@ -332,6 +378,619 @@ def journal_tag_bytes(sz, feat):
     return 8
 
 
+# ── CRC32C, and building a checksummed journal to test the driver against ────
+#
+# JBD2's checksum under csum_v2/csum_v3.  The convention is the part that is
+# easy to get wrong, so note it: reflected, polynomial 0x82f63b78, and the
+# caller's value is the running CRC verbatim -- no pre-inversion, no final xor.
+# That is the opposite of the CRC32 the rest of the kernel expects, and
+# jbd2_superblock_csum() genuinely does start from ~0.
+#
+# Verified two ways, both against e2fsprogs rather than against itself:
+#   * e2fsprogs ships its own unit test (lib/ext2fs/crc32c.c test_crc32c) with
+#     128 (seed, offset, length, expected) vectors over a fixed buffer.  This
+#     reproduces all 128 -- see crc32c_kat_ok() below.
+#   * e2fsck accepted a journal superblock whose s_checksum this computed,
+#     reported the same value back through dumpe2fs, and then refused to replay
+#     the same journal once each of the four checksums was deliberately
+#     corrupted.  scripts/jbd2_csum_ref.py does that end to end.
+
+_CRC32C_POLY = 0x82F63B78
+
+
+def _crc32c_table():
+    tab = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (c >> 1) ^ (_CRC32C_POLY if c & 1 else 0)
+        tab.append(c)
+    return tab
+
+
+_CRC32C_TAB = _crc32c_table()
+
+
+def crc32c(crc, data):
+    for b in data:
+        crc = (crc >> 8) ^ _CRC32C_TAB[(crc ^ b) & 0xFF]
+    return crc & 0xFFFFFFFF
+
+
+def crc32c_kat():
+    """Run e2fsprogs' own CRC32C test vectors against *this file's* crc32c.
+
+    The vectors live in jbd2_csum_ref.py, which is the canonical copy; only the
+    data is imported, not the implementation, so this actually tests the code
+    that builds the fixture below.  Returns (passed, total), or (0, 0) if the
+    vector file is missing.
+
+    Run as a step rather than asserted in a comment: this is the one thing the
+    whole checksummed-journal path rests on, and a comment claiming it was
+    verified cannot fail.
+    """
+    import importlib.util
+    ref = os.path.join(HERE, "jbd2_csum_ref.py")
+    if not os.path.exists(ref):
+        return 0, 0
+    spec = importlib.util.spec_from_file_location("jbd2_csum_ref", ref)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    buf = mod._kat_buf()
+    passed = 0
+    for seed, off, length, want in mod._KAT_VECTORS:
+        if crc32c(seed, buf[off:off + length]) == want:
+            passed += 1
+    return passed, len(mod._KAT_VECTORS)
+
+
+# journal superblock field offsets, from include/linux/jbd2.h
+JBD2_SB_SEQ = 0x18
+JBD2_SB_START = 0x1C
+JBD2_SB_COMPAT = 0x24
+JBD2_SB_INCOMPAT = 0x28
+JBD2_SB_UUID = 0x30
+JBD2_SB_CSUM_TYPE = 0x50
+JBD2_SB_CHECKSUM = 0xFC
+JBD2_SB_SIZE = 0x400          # sizeof(journal_superblock_t)
+
+
+def journal_sb_csum(sb):
+    """jbd2_superblock_csum(): crc32c(~0, sb, sizeof(...)) with s_checksum zero."""
+    zeroed = bytearray(sb)
+    struct.pack_into(">I", zeroed, JBD2_SB_CHECKSUM, 0)
+    return crc32c(0xFFFFFFFF, bytes(zeroed[:JBD2_SB_SIZE]))
+
+
+def journal_sb_first_block(f):
+    """Filesystem block number of the journal inode's first data block.
+
+    Walks superblock -> group descriptor -> inode table -> journal inode, the
+    same chain journal_activity() uses.  `imap` is no use here: it reports where
+    the inode is stored, not where the file's data begins.
+    """
+    def u16(off):
+        f.seek(off); return struct.unpack_from("<H", f.read(2))[0]
+    def u32(off):
+        f.seek(off); return struct.unpack_from("<I", f.read(4))[0]
+
+    jinum = u32(1024 + 0xE0)
+    if not jinum:
+        raise RuntimeError("no journal inode")
+    bs = 1024 << u32(1024 + 0x18)
+    ipg = u32(1024 + 0x28)
+    isize = u16(1024 + 0x58) or 128
+    first_data = u32(1024 + 0x14)
+    g = (jinum - 1) // ipg
+    idx = (jinum - 1) % ipg
+    f.seek((first_data + 1 + g) * bs + 8)
+    itable = struct.unpack("<I", f.read(4))[0]
+    f.seek(itable * bs + idx * isize + 0x28)
+    return struct.unpack("<I", f.read(4))[0], bs
+
+
+def enable_journal_csum(part, mode):
+    """Rewrite the journal superblock to advertise a checksummed journal.
+
+    A conformant csum_v2/v3 journal has to satisfy three things at once, and
+    getting any of them wrong makes the kernel refuse the mount outright:
+
+      * s_feature_incompat carries CSUM_V2 (or CSUM_V3)
+      * s_checksum_type is JBD2_CRC32C_CHKSUM -- a u8 at 0x50, and the kernel
+        rejects anything else ("JBD2: Unknown checksum type")
+      * s_checksum matches, over the whole 1024-byte superblock
+
+    mode is "v2", "v3" or "v2+64bit".  Returns a human-readable description of
+    what it wrote, for the test report.
+    """
+    feats = {"v2": JBD2_INCOMPAT_CSUM_V2,
+             "v3": JBD2_INCOMPAT_CSUM_V3,
+             "v2+64bit": JBD2_INCOMPAT_CSUM_V2 | JBD2_INCOMPAT_64BIT}
+    if mode not in feats:
+        raise ValueError(f"unknown journal mode {mode!r}")
+
+    with open(part, "r+b") as f:
+        jblk, bs = journal_sb_first_block(f)
+        f.seek(jblk * bs)
+        sb = bytearray(f.read(JBD2_SB_SIZE))
+        if len(sb) < JBD2_SB_SIZE:
+            raise RuntimeError(f"journal superblock at block {jblk} is short")
+
+        magic, = struct.unpack_from(">I", sb, 0)
+        if magic != JBD2_MAGIC:
+            raise RuntimeError(f"no journal magic at block {jblk}: 0x{magic:08x}")
+
+        struct.pack_into(">I", sb, JBD2_SB_INCOMPAT,
+                         struct.unpack_from(">I", sb, JBD2_SB_INCOMPAT)[0] | feats[mode])
+        sb[JBD2_SB_CSUM_TYPE] = JBD2_CRC32C_CHKSUM
+        struct.pack_into(">I", sb, JBD2_SB_CHECKSUM, journal_sb_csum(sb))
+        f.seek(jblk * bs)
+        f.write(bytes(sb))
+
+        new = struct.unpack_from(">I", sb, JBD2_SB_INCOMPAT)[0]
+        return (f"{mode}: s_feature_incompat=0x{new:08x} "
+                f"s_checksum_type={JBD2_CRC32C_CHKSUM} "
+                f"s_checksum=0x{struct.unpack_from('>I', sb, JBD2_SB_CHECKSUM)[0]:08x} "
+                f"(journal block {jblk})")
+
+
+def journal_block_map(part, ino=8):
+    """Filesystem block number of each journal block, indexed by journal block.
+
+    debugfs rather than a hand-rolled walk, for two reasons.  Reading only
+    i_block[12] covers blocks 0..3084 and runs out there, which looks like "the
+    journal ends here" rather than like a helper that ran out of pointers; and
+    debugfs already knows the extent format.  Its output is *compacted*, though,
+    which is its own trap:
+
+        (0-11):522-533, (IND):534, (12-267):535-790, (DIND):791, ...
+
+    so a naive `(\\d+):(\\d+)` per line finds nothing.  The ranges have to be
+    expanded.  (IND)/(DIND) entries are the indirection blocks themselves and
+    are not part of the data sequence.
+    """
+    out = debugfs(part, f"stat <{ino}>")
+    body, seen = "", False
+    for line in out.splitlines():
+        s = line.strip()
+        if s == "BLOCKS:":
+            seen = True
+            continue
+        if seen:
+            if s.startswith("TOTAL") or not s:
+                break
+            body += s
+    if not body:
+        return []
+
+    blk = []
+    for item in body.split(","):
+        item = item.strip()
+        m = re.fullmatch(r"\((\d+)-(\d+)\):(\d+)(?:-(\d+))?", item)
+        if not m:
+            continue                      # (IND):n / (DIND):n
+        first, last = int(m.group(1)), int(m.group(2))
+        pfirst = int(m.group(3))
+        plast = int(m.group(4)) if m.group(4) else pfirst
+        for k, logical in enumerate(range(first, last + 1)):
+            while len(blk) <= logical:
+                blk.append(0)
+            blk[logical] = pfirst + k
+        if plast != pfirst + (last - first):
+            raise RuntimeError(f"non-contiguous block range {item!r}")
+    return blk
+
+
+class JournalFormatError(Exception):
+    """The on-disk bytes are not a JBD2 log this reader can parse.
+
+    Distinct from "there is nothing committed": that is an ordinary end state,
+    this is a format defect, and the message has to name it.
+    """
+
+
+class Journal:
+    """Independent reader for an on-disk JBD2 log.
+
+    Parsed from the format -- fs/jbd2/recovery.c -- and deliberately *not* from
+    the driver's writer.  A parser written to match the writer would agree with
+    a broken driver and prove nothing, which is the whole reason these checks
+    exist.
+
+    One reader serves every check that has to understand the log.  There were
+    once two, and they drifted: both of them assumed one descriptor block per
+    transaction, which stops being true the moment a transaction has more tags
+    than fit in a single descriptor.  A full staging area is JBD2_MAX_TAGS (64)
+    tags, and on a csum_v3 journal a 1 KiB descriptor holds only 62 of them, so
+    a 64-tag transaction spans *two* descriptor blocks followed by all 64 data
+    blocks.  Both copies read the second descriptor as if it were a data block,
+    and both then reported 61 of 62 tag checksums as wrong -- a failure that
+    looks exactly like a write-path bug and is not one.
+
+    So the shape is the kernel's (fs/jbd2/recovery.c:jbd2_do_replay, and
+    do_one_pass for the descriptor scan):
+
+        descriptor*  data*  [revoke*]  commit
+
+    Steps are driven by *count*, not by sniffing for a magic, because a data
+    block is a raw copy of a home block and can perfectly well start with
+    JBD2_MAGIC by coincidence.  Only a transaction that reaches its commit block
+    is ever returned, so an uncommitted trailing transaction -- the normal end
+    state, since the driver was interrupted partway through -- can never be
+    mistaken for a corrupt one.  Two earlier versions of these checks got that
+    wrong and reported phantom defects against perfectly good checksums.
+    """
+
+    def __init__(self, part):
+        self.part = part
+        with open(part, "rb") as f:
+            def u16(off, base=0):
+                f.seek(base + off); return struct.unpack_from("<H", f.read(2))[0]
+            def u32(off, base=0):
+                f.seek(base + off); return struct.unpack_from("<I", f.read(4))[0]
+
+            if u16(0x38, 1024) != 0xEF53:
+                raise JournalFormatError("no ext2 magic")
+            self.jinum = u32(0xE0, 1024)
+            if not self.jinum:
+                raise JournalFormatError("journalless image")
+            self.bs = 1024 << u32(0x18, 1024)
+            self.blocks_count = u32(0x04, 1024)
+            self.ipg = u32(0x28, 1024)
+            isize = u16(0x58, 1024) or 128
+            first_data = u32(0x14, 1024)
+            self.bpg = u32(0x20, 1024)
+
+            # Blocks whose corruption makes e2fsck stop trusting the primary
+            # superblock.  It falls back to the backup copies and then rebuilds
+            # the filesystem from them, which *restores* damaged blocks without
+            # the journal ever being read.  Any check that wants to prove the
+            # journal works has to leave these alone -- see
+            # journal_recovery_restore().
+            groups = 0
+            if self.bpg:
+                groups = (self.blocks_count - first_data + self.bpg - 1) // self.bpg
+            self.structural = set(range(0, 8)) | {
+                first_data + 1 + g * self.bpg for g in range(groups)}
+
+            g = (self.jinum - 1) // self.ipg
+            idx = (self.jinum - 1) % self.ipg
+            f.seek((first_data + 1 + g) * self.bs + 8)
+            itable = struct.unpack("<I", f.read(4))[0]
+            f.seek(itable * self.bs + idx * isize + 0x28)
+            jsuper = struct.unpack("<I", f.read(4))[0]
+
+        self.jmap = journal_block_map(part, self.jinum)
+        if len(self.jmap) < 8:
+            raise JournalFormatError(
+                f"journal block map has only {len(self.jmap)} blocks")
+
+        with open(part, "rb") as f:
+            f.seek(jsuper * self.bs)
+            jsb = f.read(self.bs)
+        magic, = struct.unpack_from(">I", jsb, 0)
+        if magic != JBD2_MAGIC:
+            raise JournalFormatError(
+                f"journal magic 0x{magic:08x} at block {jsuper}")
+        self.jsuper_block = jsuper
+        self.sb = jsb
+        self.jmaxlen, self.jfirst = struct.unpack_from(">II", jsb, 16)
+        self.jfeat, = struct.unpack_from(">I", jsb, 40)
+        self.tbytes = journal_tag_bytes(self.bs, self.jfeat)
+        self.seed = crc32c(0xFFFFFFFF, jsb[JBD2_SB_UUID:JBD2_SB_UUID + 16])
+
+        # journal_tag_bytes() and count_tags(), transcribed.  Note that the tag
+        # walk stops short of the descriptor tail on a checksummed journal,
+        # because sizeof(struct jbd2_journal_block_tail) is 4, not 8.
+        self.checksummed = bool(self.jfeat & (JBD2_INCOMPAT_CSUM_V2 |
+                                              JBD2_INCOMPAT_CSUM_V3))
+        self.csum_v3 = bool(self.jfeat & JBD2_INCOMPAT_CSUM_V3)
+        self.tail_at = self.bs - 4
+        self.tag_limit = self.bs - 4 if self.checksummed else self.bs
+
+    def variant(self, expected):
+        """Assert the on-disk journal really is `expected`; return a description.
+
+        The csum variants produce the *same* replay geometry: the same log block
+        numbers, the same tag count, the same list of restored blocks.  So a
+        green run of `--journal-csum v3` is indistinguishable in the report from
+        a green run of plain ext3 -- which is a check that can pass for the
+        wrong reason.  If enable_journal_csum() silently did nothing, every step
+        after it would still be green and the v2/v3/v2+64bit rows of the matrix
+        would all be the same test wearing three different labels.
+
+        So the journal's feature bits are asserted against what the variant
+        requires, the tag size the reader derived from them is asserted against
+        what that variant implies, and the description goes into the report so a
+        reader can see which format was actually exercised.
+
+        The tag sizes are not redundant with the feature check: they are what
+        every subsequent tag offset is computed from, so a wrong tag size
+        silently shifts the whole tag walk rather than failing loudly.
+        """
+        want = {
+            None:       (0, 8),
+            "v2":       (JBD2_INCOMPAT_CSUM_V2, 10),
+            "v3":       (JBD2_INCOMPAT_CSUM_V3, 16),
+            "v2+64bit": (JBD2_INCOMPAT_64BIT | JBD2_INCOMPAT_CSUM_V2, 14),
+        }
+        if expected not in want:
+            raise JournalFormatError(f"unknown journal csum variant "
+                                     f"{expected!r}")
+        need, tbytes = want[expected]
+        if self.jfeat != need:
+            raise JournalFormatError(
+                f"journal features are 0x{self.jfeat:08x} but variant "
+                f"{expected or 'v1'!r} needs 0x{need:08x} -- this image is not "
+                f"the one that was asked for")
+        if self.tbytes != tbytes:
+            raise JournalFormatError(
+                f"variant {expected or 'v1'!r} implies {tbytes}-byte tags, but "
+                f"journal_tag_bytes() derived {self.tbytes} from features "
+                f"0x{self.jfeat:08x}")
+        names = [n for bit, n in (
+            (JBD2_INCOMPAT_REVOKE, "REVOKE"),
+            (JBD2_INCOMPAT_64BIT, "64BIT"),
+            (JBD2_INCOMPAT_ASYNC, "ASYNC_COMMIT"),
+            (JBD2_INCOMPAT_CSUM_V2, "CSUM_V2"),
+            (JBD2_INCOMPAT_CSUM_V3, "CSUM_V3"),
+        ) if self.jfeat & bit]
+        return (f"variant={expected or 'v1'} "
+                f"features=0x{self.jfeat:08x} "
+                f"({' '.join(names) if names else 'none'}) "
+                f"tag={self.tbytes}B bs={self.bs} jmaxlen={self.jmaxlen}")
+
+    # ── primitives ──────────────────────────────────────────────────────
+
+    def read(self, n):
+        """Journal block n as bytes, or None if it is not addressable."""
+        if n < 0 or n >= len(self.jmap):
+            return None
+        with open(self.part, "rb") as f:
+            f.seek(self.jmap[n] * self.bs)
+            d = f.read(self.bs)
+        return d if len(d) == self.bs else None
+
+    def parse_tags(self, d, log):
+        """(home_block, stored_tag_checksum) for each tag in a descriptor.
+
+        t_flags is read as a be16 at tag+6 for *every* tag size, csum_v3
+        included -- even though journal_block_tag3_t::t_flags is a be32 at
+        tag+4.  That is not a mistake in the kernel, it is a deliberate
+        asymmetry: commit.c writes be32 at +4 while count_tags() and
+        jbd2_do_replay() both read be16 at +6.  It is safe because every flag
+        value is <= JBD2_FLAG_MASK (0x0F), so a be32 of one lands as
+        00 00 00 ff, and bytes 6 and 7 read back as 0x00ff.  Reading a be32 at
+        +4 yields the same number, so either works here; reading be16 at +6 is
+        what the format actually is.
+
+        The *checksum* does move: csum_v2 keeps a be16 at tag+4, csum_v3 a full
+        be32 at tag+12.
+        """
+        out = []
+        off = 12
+        first = True
+        while off + self.tbytes <= self.tag_limit:
+            blk, = struct.unpack_from(">I", d, off)
+            flags, = struct.unpack_from(">H", d, off + 6)
+            if flags & JBD2_FLAG_ESCAPE:
+                break
+            if flags & JBD2_FLAG_DELETED:
+                blk = 0
+            elif blk == 0 or blk >= self.blocks_count:
+                # A tag naming block 0 or a block past the end of the
+                # filesystem means this is not a JBD2 tag stream.  Say so
+                # directly: the alternative is walking into the middle of the
+                # block until something looks like a commit header, which
+                # produces a baffling "no journal magic" instead of naming the
+                # actual defect.
+                raise JournalFormatError(
+                    f"descriptor at log block {log} does not parse as a JBD2 "
+                    f"tag stream: tag at byte {off} names filesystem block "
+                    f"{blk}, which is outside 0..{self.blocks_count - 1}. "
+                    f"Parsed per the format with a {self.tbytes}-byte stride, "
+                    f"so the driver's tag spacing does not match the on-disk "
+                    f"format and no real JBD2 reader can replay this journal.")
+            if self.csum_v3:
+                tcsum, = struct.unpack_from(">I", d, off + 12)
+            elif self.checksummed:
+                tcsum, = struct.unpack_from(">H", d, off + 4)
+            else:
+                tcsum = None
+            out.append((blk, tcsum))
+            off += self.tbytes
+            if not (flags & JBD2_FLAG_SAME_UUID):
+                off += 16          # the journal UUID follows the first tag
+            first = False
+            if flags & JBD2_FLAG_LAST_TAG:
+                break
+        if not out:
+            raise JournalFormatError(
+                f"descriptor at log block {log} yields no tags")
+        return out
+
+    # ── the four checksums ──────────────────────────────────────────────
+
+    def desc_csum(self, d):
+        """(stored, computed) for a descriptor block's tail, or None."""
+        if not self.checksummed:
+            return None
+        z = bytearray(d)
+        z[self.tail_at:self.tail_at + 4] = b"\0\0\0\0"
+        return (struct.unpack_from(">I", d, self.tail_at)[0],
+                crc32c(self.seed, bytes(z)))
+
+    def commit_csum(self, d):
+        """(stored, computed) for a commit block's h_chksum[0], or None.
+
+        h_chksum[0] is at offset 16 -- three be32 header fields, then two u8
+        descriptors and two pad bytes.  h_chksum_type and h_chksum_size stay 0
+        even under csum_v2; jbd2_commit_block_csum_set() zeroes them
+        explicitly.
+        """
+        if not self.checksummed:
+            return None
+        z = bytearray(d)
+        z[16:20] = b"\0\0\0\0"
+        return struct.unpack_from(">I", d, 16)[0], crc32c(self.seed, bytes(z))
+
+    def tag_csum(self, seq, home, data):
+        """The tag checksum the kernel computes for one journalled block.
+
+        crc32c over the be32 sequence, then over the data block.  csum_v2 stores
+        only the low 16 bits (jbd2_block_tag_csum_verify compares against
+        cpu_to_be16); csum_v3 stores all 32.
+        """
+        full = crc32c(crc32c(self.seed, struct.pack(">I", seq)), data)
+        return (full, full) if self.csum_v3 else (full & 0xFFFF, full & 0xFFFF)
+
+    # ── the walk ────────────────────────────────────────────────────────
+
+    def transactions(self):
+        """Yield (seq, first_log, descs, tags, data_logs, commit_log, commit).
+
+        `descs` is a list of (log, stored, computed) tail checksums, `tags` a
+        list of (home, stored_tag_csum), and `data_logs` the journal block
+        number each tag's data copy lives at -- same order, so data_logs[i]
+        belongs to tags[i].
+
+        Only committed transactions are yielded.
+        """
+        pos = self.jfirst
+        while 0 <= pos < self.jmaxlen:
+            # 1. One or more descriptor blocks, all carrying the same sequence.
+            descs, tags, seq, start = [], [], None, None
+            while True:
+                d = self.read(pos)
+                if d is None:
+                    return
+                magic, btype, bseq = struct.unpack_from(">III", d, 0)
+                if magic != JBD2_MAGIC or btype != JBD2_DESCRIPTOR:
+                    break
+                if seq is None:
+                    seq, start = bseq, pos
+                elif bseq != seq:
+                    # Not this transaction's descriptor after all.
+                    break
+                csum = self.desc_csum(d)
+                descs.append((pos,) + (csum if csum else (None, None)))
+                tags.extend(self.parse_tags(d, pos))
+                pos += 1
+            if not descs:
+                return
+
+            # 2. Exactly one data block per tag, in tag order.  Stepped by
+            #    count: a data block carries no journal header, so there is
+            #    nothing to sniff for, and its first four bytes are home-block
+            #    content that may legitimately equal JBD2_MAGIC.
+            data_logs = []
+            for i in range(len(tags)):
+                if self.read(pos + i) is None:
+                    return          # torn write: this transaction never commits
+                data_logs.append(pos + i)
+            pos += len(tags)
+
+            # 3. Revoke blocks, if the feature is in use, then the commit.
+            while True:
+                d = self.read(pos)
+                if d is None:
+                    return
+                magic, btype, bseq = struct.unpack_from(">III", d, 0)
+                if magic == JBD2_MAGIC and btype == JBD2_REVOKE:
+                    pos += 1
+                    continue
+                break
+            if magic != JBD2_MAGIC or btype != JBD2_COMMIT or bseq != seq:
+                # Uncommitted: the journal was interrupted, or this is the
+                # erased region past the head.  Drop it and stop -- there is
+                # nothing after an uncommitted transaction to be trusted.
+                return
+            csum = self.commit_csum(d)
+            yield (seq, start, descs, tags, data_logs, pos,
+                   csum if csum else (None, None))
+            pos += 1
+
+
+def journal_csum_verify(part):
+    """Recompute every checksum of every *committed* transaction on disk.
+
+    The other checks here judge the journal by what e2fsck makes of it, which
+    is only as good as e2fsck choosing to look.  This reads the bytes back and
+    verifies all four checksums directly, so a driver that wrote a plausible
+    but wrong value is caught even if no reader happened to object.
+
+    Three ways a check like this passes without having done anything, all of
+    them closed here:
+
+      * Verifying an **uncommitted** transaction.  Its descriptor may be on disk
+        with only some of its data blocks written, so its tag checksums are
+        meaningless.  Two earlier versions of this function did exactly that
+        and reported phantom defects against correct checksums.
+      * Verifying a transaction spanning **several descriptor blocks**.  The
+        data blocks follow all of them, so reading the second descriptor as a
+        data block misaligns everything after it.
+      * **Zero** committed transactions, which verifies trivially.
+
+    Returns (ok, note).  The note carries the counts, which is the evidence
+    that the check did real work.
+    """
+    try:
+        j = Journal(part)
+    except JournalFormatError as e:
+        return False, str(e)
+
+    if not j.checksummed:
+        return True, (f"journal has no checksum feature (incompat=0x{j.jfeat:08x}), "
+                      f"nothing to verify")
+
+    good = bad = txns = tags_seen = 0
+    widest = (0, 0, 0)      # (descriptor blocks, tags, seq) of the widest txn
+    failures = []
+
+    def tally(what, stored, calc):
+        nonlocal good, bad
+        good += stored == calc
+        bad += stored != calc
+        if stored != calc:
+            failures.append(f"{what}: 0x{stored:x} != 0x{calc:x}")
+
+    for (seq, first, descs, tags, data_logs, clog, csum) in j.transactions():
+        txns += 1
+        if len(descs) > widest[0]:
+            widest = (len(descs), len(tags), seq)
+        for (log, stored, calc) in descs:
+            tally(f"descriptor tail at log block {log}", stored, calc)
+        for i, (home, stored) in enumerate(tags):
+            tags_seen += 1
+            if not home or stored is None:
+                continue          # deleted tag: no data block, nothing to cover
+            data = j.read(data_logs[i])
+            if data is None:
+                return False, f"journal block {data_logs[i]} vanished mid-walk"
+            _, full = j.tag_csum(seq, home, data)
+            want = full if j.csum_v3 else full & 0xFFFF
+            tally(f"data for home block {home} at log block {data_logs[i]}",
+                  stored, want)
+        tally(f"commit at log block {clog}", csum[0], csum[1])
+
+    if txns == 0:
+        return False, ("no committed transaction on disk; the checksums were "                       "verified against nothing")
+    if bad:
+        return False, (f"{bad} of {good + bad} kernel-written checksums do not "
+                       f"recompute. First: {failures[0]}")
+    note = (f"all {good} checksums across {txns} committed transaction(s) and "
+            f"{tags_seen} tag(s) recompute exactly ({j.tbytes}-byte tags, "
+            f"seed 0x{j.seed:08x})")
+    if widest[0] > 1:
+        # Worth calling out: the tag stream only continues across a descriptor
+        # boundary correctly if the data blocks are known to come after *all*
+        # of them, and a reader that gets that wrong agrees with a broken
+        # driver.  So the widest transaction is the one carrying the evidence.
+        note += (f"; widest was {widest[1]} tags over {widest[0]} descriptor "
+                 f"blocks (seq {widest[2]})")
+    return True, note
+
+
 def journal_recovery_restore(part):
     """Corrupt the home copies of the live journalled transaction, replay, and
     check they come back.  Returns (ok, note).
@@ -339,174 +998,83 @@ def journal_recovery_restore(part):
     This is the only check here that can tell a *working* journal from a
     journal that merely exists.  Every other check is satisfied by a
     filesystem whose home copies were already correct, which is the state the
-    driver is always in: it writes the home locations immediately after the
+    driver is always in: it writes the home copies immediately after the
     commit block, so there is normally nothing for recovery to do and a
     correct replay and a no-op are indistinguishable.
 
-    So this manufactures the situation recovery exists for.  It reads the
+    So this manufactures the situation recovery exists for.  It reads a
     transaction the driver actually committed, records the home blocks'
-    contents, overwrites them with garbage, and asks e2fsck to recover.  If
-    the on-disk format is right the journal copy is written back and the
-    blocks are restored; if the format is wrong e2fsck cannot parse the
-    descriptor, silently recovers nothing, and -- this is the part that
-    matters -- still exits 0 and reports a clean filesystem.
+    contents, overwrites them with garbage, and asks e2fsck to recover.  If the
+    on-disk format is right the journal copy is written back and the blocks are
+    restored; if the format is wrong e2fsck cannot parse the descriptor,
+    silently recovers nothing, and -- this is the part that matters -- still
+    exits 0 and reports a clean filesystem.
 
-    The descriptor is parsed here from the *format* (unpadded tag stride, a
-    16-byte journal UUID after the first tag of each descriptor), not from the
-    driver's writer, so this is an independent check.  A parser written to
-    match the driver would agree with a broken driver and prove nothing.
+    Two ways this check used to pass without the journal doing anything, both
+    now closed:
+
+      * **e2fsck rebuilt the filesystem instead of replaying.**  The first
+        version poisoned the group descriptor table along with everything else.
+        e2fsck rejected the primary, fell back to the backup copies, and
+        reconstructed every inode table block from them -- so the blocks came
+        back, the check passed, and the journal was never opened.  The tell is
+        the log line "Group descriptors look bad... trying backup blocks", and
+        the structural blocks are now excluded from the poison set.
+      * **e2fsck replayed the journal but the log was unwalkable.**  The second
+        version excluded the structural blocks, which did produce a real
+        "recovering journal", and still passed on an image whose replay left an
+        empty root directory -- because "the block no longer holds the poison"
+        is also true of a block e2fsck overwrote with zeroes while rebuilding
+        it.  So the check now also requires that the filesystem around the
+        repaired blocks is *intact*: a file that existed before recovery must
+        still read back afterwards.  A rebuild clears every inode; a replay
+        leaves them alone.
 
     Returns (False, reason) rather than raising when there is no committed
-    transaction to test, so the caller can report "nothing to check" instead
-    of a spurious pass.
+    transaction to test, so the caller can report "nothing to check" instead of
+    a spurious pass.
     """
-    shutil.copyfile(part, part + ".recover")
     work = part + ".recover"
+    shutil.copyfile(part, work)
 
-    with open(part, "rb") as f:
-        def u16(off, base=0):
-            f.seek(base + off); return struct.unpack_from("<H", f.read(2))[0]
-        def u32(off, base=0):
-            f.seek(base + off); return struct.unpack_from("<I", f.read(4))[0]
+    try:
+        j = Journal(work)
+    except JournalFormatError as e:
+        os.path.exists(work) and os.unlink(work)
+        return False, str(e)
 
-        if u16(0x38, 1024) != 0xEF53:
-            return False, "no ext2 magic"
-        journal_inum = u32(0xE0, 1024)
-        if journal_inum == 0:
-            return False, "journalless image, nothing to recover"
+    # The last committed transaction is the one a crash would leave for replay.
+    live = None
+    for txn in j.transactions():
+        live = txn
+    if live is None:
+        os.unlink(work)
+        return False, "no committed transaction to recover"
 
-        bs = 1024 << u32(0x18, 1024)
-        blocks_count = u32(0x04, 1024)
-        inodes_per_group = u32(0x28, 1024)
-        inode_size = u16(0x58, 1024) or 128
-        first_data = u32(0x14, 1024)
+    _seq, first, _descs, tags, _data_logs, clog, _csum = live
+    named = sorted({h for h, _ in tags if h})
+    home = [b for b in named if b not in j.structural]
+    skipped = [b for b in named if b in j.structural]
+    if not home:
+        os.unlink(work)
+        return False, (f"the last committed transaction names only structural "
+                       f"block(s) {named}, so there is no crash window to "
+                       f"manufacture that e2fsck would answer with a replay "
+                       f"rather than a rebuild")
 
-        g = (journal_inum - 1) // inodes_per_group
-        idx = (journal_inum - 1) % inodes_per_group
-        f.seek((first_data + 1 + g) * bs + 8)
-        itable = struct.unpack("<I", f.read(4))[0]
-        f.seek(itable * bs + idx * inode_size + 0x28)
-        direct = list(struct.unpack("<12I", f.read(48)))
-        f.seek(itable * bs + idx * inode_size + 0x28 + 48)
-        ind_blk = struct.unpack("<I", f.read(4))[0]
+    # A file that must still be readable afterwards, to tell a replay from a
+    # rebuild.  Read before anything is touched so the expectation is the
+    # driver's own output, not a hardcoded guess.
+    sentinel_path, sentinel_want = "/etc/conf.txt", b"alpha content one"
+    sentinel_had = sentinel_want in debugfs(work, f"cat {sentinel_path}").encode(
+        "utf-8", "replace")
 
-        def jblock(n):
-            """journal block n -> filesystem block number"""
-            if n < 12:
-                return direct[n]
-            if not ind_blk:
-                return None
-            f.seek(ind_blk * bs + (n - 12) * 4)
-            v = struct.unpack("<I", f.read(4))[0]
-            return v or None
-
-        # Journal superblock: big-endian, and s_start == 0 means the log has
-        # never been used, so there is no committed transaction to test.
-        f.seek(direct[0] * bs)
-        jsb = f.read(bs)
-        jmagic, jtype = struct.unpack(">II", jsb[0:8])
-        if jmagic != JBD2_MAGIC:
-            return False, f"journal superblock magic is 0x{jmagic:08x}"
-        jmaxlen, = struct.unpack(">I", jsb[16:20])
-        jfirst, = struct.unpack(">I", jsb[20:24])
-        jfeat, = struct.unpack(">I", jsb[40:44])
-        tbytes = journal_tag_bytes(bs, jfeat)
-
-        def read_jblk(n):
-            b = jblock(n % jmaxlen)
-            if b is None:
-                return None
-            f.seek(b * bs)
-            d = f.read(bs)
-            return b, d
-
-        # Find the transaction at s_start (or jfirst when s_start is 0).
-        start, = struct.unpack(">I", jsb[28:32])
-        pos = start if start else jfirst
-        tags, seq = [], None
-        # Walk the transaction: descriptor, then one data block per tag, then
-        # the next descriptor or the commit block.  The data blocks carry no
-        # journal magic -- they are raw copies of the home blocks -- so the
-        # walk has to step over them by count rather than sniffing for a
-        # header, or it stops on the first data block and reports "nothing
-        # committed" for a transaction that is sitting right there.
-        for _ in range(64):
-            got = read_jblk(pos)
-            if got is None:
-                return False, "journal block map exhausted while walking"
-            fblk, d = got
-            magic, btype, bseq = struct.unpack(">III", d[0:12])
-            if magic != JBD2_MAGIC:
-                return False, (f"no journal magic at journal block {pos} -- "
-                               f"nothing committed to recover")
-            if btype == JBD2_COMMIT:
-                if seq is not None and bseq != seq:
-                    return False, "commit sequence does not match its descriptors"
-                break
-            if btype != JBD2_DESCRIPTOR:
-                # revoke / superblock / fc blocks are legal between descriptors
-                pos += 1
-                continue
-            if seq is None:
-                seq = bseq
-            elif bseq != seq:
-                return False, "descriptor sequence mismatch mid-transaction"
-            # Walk this descriptor's tag stream per the format.
-            off = 12
-            n_in_desc = 0
-            first_tag = True
-            while off + tbytes <= bs:
-                blk, = struct.unpack(">I", d[off:off + 4])
-                flags, = struct.unpack(">H", d[off + 6:off + 8])
-                if flags & JBD2_FLAG_ESCAPE:
-                    break
-                if not (flags & JBD2_FLAG_DELETED):
-                    if blk == 0 or blk >= blocks_count:
-                        # A tag naming block 0 or a block past the end of the
-                        # filesystem means this stream is not a JBD2 tag
-                        # stream.  Reporting that directly is the whole point:
-                        # the alternative is walking into the middle of the
-                        # block until something looks like a commit header,
-                        # which produces a baffling "no journal magic" instead
-                        # of naming the actual defect.
-                        return False, (
-                            f"descriptor at journal block {pos} does not "
-                            f"parse as a JBD2 tag stream: tag at byte {off} "
-                            f"names filesystem block {blk}, which is outside "
-                            f"0..{blocks_count - 1}. Parsed per the format with "
-                            f"a {tbytes}-byte stride, so the driver's tag "
-                            f"spacing does not match the on-disk format and no "
-                            f"real JBD2 reader can replay this journal.")
-                    tags.append(blk)
-                    n_in_desc += 1
-                off += tbytes
-                if not (flags & JBD2_FLAG_SAME_UUID):
-                    off += 16          # journal UUID follows the first tag
-                if flags & JBD2_FLAG_LAST_TAG:
-                    break
-                if first_tag:
-                    first_tag = False
-            # Skip this descriptor's data blocks to reach the next one.
-            pos += 1 + n_in_desc
-        else:
-            return False, "no commit block found within 64 journal blocks"
-
-        if not tags:
-            return False, "the committed transaction names no blocks"
-
-        # Snapshot, corrupt, replay, compare.
-        home = [b for b in tags if 0 < b]
-        if not home:
-            return False, f"transaction names only block 0: {tags}"
-
-        f.seek(0)
-        whole = f.read()
-        before = {b: whole[b * bs:(b + 1) * bs] for b in home}
-        poison = b"\xde\xad\xbe\xef" * (bs // 4)
-
+    bs = j.bs
+    poison = b"\xde\xad\xbe\xef" * (bs // 4)
     with open(work, "r+b") as f:
         for b in home:
-            f.seek(b * bs); f.write(poison)
+            f.seek(b * bs)
+            f.write(poison)
 
     rc, out = fsck(work, fix=True)
 
@@ -514,26 +1082,70 @@ def journal_recovery_restore(part):
         restored, still_bad = [], []
         for b in home:
             f.seek(b * bs)
-            d = f.read(bs)
-            (still_bad if d == poison else restored).append(b)
-
+            (still_bad if f.read(bs) == poison else restored).append(b)
+    rebuilt = [ln.strip() for ln in out.splitlines() if "look bad" in ln]
+    sentinel_now = debugfs(work, f"cat {sentinel_path}")
     os.unlink(work)
 
+    where = (f"transaction seq {_seq} at log block {first}, committed at log "
+             f"block {clog}, {len(tags)} tag(s) over {len(home)} live block(s)")
+    if skipped:
+        where += f" ({len(skipped)} structural block(s) {skipped} left intact)"
+
+    # A rebuild, not a replay.  Checked first: everything below is meaningless
+    # if e2fsck discarded the primary and reconstructed the filesystem.
+    if rebuilt:
+        return False, (
+            f"e2fsck rejected the primary superblock and fell back to the "
+            f"backups ({rebuilt[0]}), so it rebuilt the filesystem rather than "
+            f"replaying the journal. The {where} was never exercised.")
+
+    if sentinel_had and sentinel_want.decode() not in sentinel_now:
+        return False, (
+            f"e2fsck replayed the journal but {sentinel_path} no longer reads "
+            f"back ({sentinel_now.strip()!r} instead of "
+            f"{sentinel_want.decode()!r}), so replay did not reconstruct the "
+            f"filesystem it was supposed to. {where.capitalize()}. This is what "
+            f"an unwalkable log looks like from the outside: the blocks are "
+            f"no longer corrupt, but the metadata that describes them is not "
+            f"the driver's.")
+
+    # A checksum complaint is its own failure, distinct from "not restored".
+    # e2fsck can restore most of a transaction and still reject one block's
+    # checksum, in which case still_bad is empty and the restore check alone
+    # would call a journal with a wrong checksum correct.  On a checksummed
+    # journal this is the assertion that the driver's *written* checksums are
+    # right, because e2fsck recomputes all of them while replaying.
+    csum_err = [ln for ln in out.splitlines()
+                if "checksum" in ln.lower() and "error" in ln.lower()]
+    if csum_err:
+        return False, (
+            f"e2fsck rejected the driver's journal checksums while replaying: "
+            f"{csum_err[0].strip()}. Every checksum it verified is one the "
+            f"driver wrote, so this is a write-path defect, not a recovery one.")
+
+    where = (f"transaction seq {_seq} at log block {first}, committed at log "
+             f"block {clog}, {len(tags)} tag(s) over {len(home)} live block(s)")
     if still_bad:
         return False, (
             f"e2fsck did not restore {len(still_bad)}/{len(home)} journalled "
-            f"block(s) {still_bad} from the journal after a crash-window "
-            f"corruption (e2fsck rc={rc}, i.e. it reported success anyway). "
-            f"Tag stream parsed per the format with a {tbytes}-byte stride; the "
-            f"journal is present but its descriptor block is not in a form a "
-            f"real JBD2 reader can walk.")
-    return True, (f"e2fsck replay restored {len(restored)}/{len(home)} "
-                  f"journalled block(s) {sorted(restored)} (rc={rc})")
+            f"block(s) {still_bad} after a crash-window corruption, and still "
+            f"exited {rc}. {where.capitalize()}. Tag stream parsed per the "
+            f"format with a {j.tbytes}-byte stride; the journal is present but "
+            f"its descriptor blocks are not in a form a real JBD2 reader can "
+            f"walk.")
+    note = (f"e2fsck replay of the {where} restored {len(restored)}/{len(home)} "
+            f"journalled block(s) {restored} (rc={rc}")
+    if skipped:
+        note += f", {len(skipped)} structural block(s) {skipped} not damaged"
+    if sentinel_had:
+        note += f", {sentinel_path} still intact"
+    return True, note + ")"
 
 
 # ───────────────────────────── the test itself ─────────────────────────────
 
-def run(fstype, keep):
+def run(fstype, keep, journal_csum=None):
     os.makedirs(WORK, exist_ok=True)
     disk = os.path.join(WORK, f"disk-{fstype}.img")
     part = os.path.join(WORK, f"part-{fstype}.img")
@@ -557,16 +1169,47 @@ def run(fstype, keep):
         lines.append(f"  [{'ok ' if ok else 'FAIL'}] {label}{tail}")
         log(lines[-1])
 
+    # The fixture is built by this script's own CRC32C, so prove that checksum
+    # against e2fsprogs before trusting anything derived from it.  A wrong
+    # fixture would otherwise be rejected by the kernel at mount, and the
+    # rejection would look like a driver defect.
+    if journal_csum:
+        passed, total = crc32c_kat()
+        step(total > 0 and passed == total,
+             "CRC32C matches e2fsprogs' own test vectors",
+             f"{passed}/{total} vectors matched; the {journal_csum} fixture is "
+             f"built with this function, so a mismatch invalidates this run")
+
     log(f"=== building {fstype} image ===")
-    if not build_image(disk, fstype):
+    if not build_image(disk, fstype, journal_csum=journal_csum):
         lines.append("mke2fs FAILED")
         open(report, "w").write("\n".join(lines))
         return False
-    step(True, f"built {DISK_SIZE_M}M disk with {fstype}")
+    step(True, f"built {DISK_SIZE_M}M disk with {fstype}"
+               + (f" + journal {journal_csum}" if journal_csum else ""))
 
     # Confirm the image really is what we think it is, before blaming the kernel.
     rc, out = fsck(extract_partition(disk, part) and part)
     step(rc == 0, "freshly built image passes e2fsck", f"rc={rc}\n{out}")
+
+    if journal_csum:
+        # Two things must be true for the kernel to mount this at all, and both
+        # are checked by dumpe2fs -- an independent implementation echoing back
+        # our own s_checksum is the point.
+        d = subprocess.run(["dumpe2fs", "-h", part], capture_output=True, text=True)
+        jfeat = next((l.split(":", 1)[1].strip() for l in d.stdout.splitlines()
+                      if l.startswith("Journal features")), "")
+        jtype = next((l.split(":", 1)[1].strip() for l in d.stdout.splitlines()
+                      if l.startswith("Journal checksum type")), "")
+        jsum = next((l.split(":", 1)[1].strip() for l in d.stdout.splitlines()
+                     if l.startswith("Journal checksum")), "")
+        want_feat = {"v2": "journal_checksum_v2",
+                     "v3": "journal_checksum_v3",
+                     "v2+64bit": "journal_checksum_v2"}.get(journal_csum, "")
+        step(want_feat in jfeat and jtype == "crc32c" and jsum != "0",
+             f"e2fsprogs sees a crc32c {journal_csum} journal",
+             f"features={jfeat!r} type={jtype!r} checksum={jsum!r}",
+             evidence=f"{jfeat}, {jtype}, {jsum}")
 
     log(f"=== booting guest with {fstype} disk ===")
     g = Guest(disk, open(serial, "wb"))
@@ -639,6 +1282,14 @@ def run(fstype, keep):
         nblocks, note = journal_activity(part)
         step(nblocks > 0, "writes reached the JBD2 journal", note)
 
+        # Read the variant once; both the recovery and checksum steps
+        # below depend on the journal being the one that was asked for,
+        # and none of them distinguishes the three formats on their own.
+        j = Journal(part)
+        _vd = j.variant(journal_csum)
+        step(True, f"journal is the {journal_csum or 'v1'} format",
+             evidence=_vd)
+
         # EXT3_FEATURE_INCOMPAT_RECOVER = 0x0004 in s_feature_incompat, which
         # lives at byte 1024 + 0x60 of the partition.
         #
@@ -661,6 +1312,13 @@ def run(fstype, keep):
         # nothing left for recovery to do.
         ok, note = journal_recovery_restore(part)
         step(ok, "e2fsck can actually replay the journal", note,
+             evidence=note if ok else "")
+
+        # Read the checksums back and recompute them, rather than leaving it to
+        # whether e2fsck happened to object. On a v1 journal this reports that
+        # there is nothing to verify, which is the honest answer.
+        ok, note = journal_csum_verify(part)
+        step(ok, "kernel-written journal checksums recompute", note,
              evidence=note if ok else "")
 
     panic = b"OWPANIC" in g.raw
@@ -708,11 +1366,21 @@ def main():
                     choices=["ext2", "ext3", "ext4"])
     ap.add_argument("--keep", action="store_true",
                     help="keep the disk image for inspection")
+    ap.add_argument("--journal-csum", default=None,
+                    choices=["v2", "v3", "v2+64bit"],
+                    help="build the journal superblock to advertise a "
+                         "checksummed journal. mke2fs here cannot do this "
+                         "(its /etc/mke2fs.conf has no [journal] section and "
+                         "this build ignores MKE2FS_CONFIG), so fs_test.py "
+                         "rewrites it and dumpe2fs/e2fsck remain the authority.")
     args = ap.parse_args()
     if not os.path.exists(ISO):
         log(f"missing {ISO} -- build it with: make -C {KERNEL_DIR} codeos-1-kernel.iso")
         return 2
-    return 0 if run(args.fstype, args.keep) else 1
+    if args.journal_csum and args.fstype == "ext2":
+        log("ext2 has no journal; --journal-csum would test nothing")
+        return 2
+    return 0 if run(args.fstype, args.keep, args.journal_csum) else 1
 
 
 if __name__ == "__main__":

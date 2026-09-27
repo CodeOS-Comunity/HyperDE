@@ -148,6 +148,15 @@ struct jbd2_commit {
     uint32_t h_commit_nsec;
 } __attribute__((packed));
 
+/* ── tail of a checksummed descriptor block ──────────────────────────── */
+/* Under csum_v2/csum_v3 the last sizeof(this) bytes of every descriptor block
+ * hold crc32c(j_csum_seed, the whole block) with t_checksum treated as zero.
+ * The kernel's count_tags() shrinks its walk by exactly this much, so a writer
+ * that omits the reservation overruns the tag stream by four bytes. */
+struct jbd2_journal_block_tail {
+    uint32_t t_checksum;
+} __attribute__((packed));
+
 /* ── revoke table ────────────────────────────────────────────────────── */
 /* A revoke block starts with a journal header plus a byte count, followed by a
  * bare bitmap: word N covers blocks 32*N .. 32*N+31. The bitmap follows the

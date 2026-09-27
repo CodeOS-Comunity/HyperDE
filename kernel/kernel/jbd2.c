@@ -3,6 +3,7 @@
 #include "kprintf.h"
 #include "string.h"
 #include "mm.h"
+#include <stddef.h>
 
 /* JBD2 journal for the ext2/3 driver.
  *
@@ -85,6 +86,50 @@ static inline uint16_t bswap16(uint16_t v) {
 #define be16(v) bswap16(v)
 #define le16(v) bswap16(v)
 
+/* ── CRC32C ────────────────────────────────────────────────────────────────
+ * JBD2's checksum under csum_v2/csum_v3, and nothing else uses it.
+ *
+ * The convention is the thing that is easy to get wrong, so it is worth being
+ * explicit.  crc32c() is the plain Sarwate loop -- reflected, polynomial
+ * 0x82f63b78 -- with the caller's value used verbatim as the running CRC: no
+ * pre-inversion and no final xor, unlike the CRC32 that the kernel's other
+ * subsystems expect.  The seed is therefore what it is, and
+ * jbd2_superblock_csum() really does start from ~0.
+ *
+ * Verified against e2fsprogs rather than against the documentation: its own
+ * unit test (lib/ext2fs/crc32c.c, test_crc32c) carries 128 (seed, offset,
+ * length, expected) vectors over a fixed buffer, and this construction
+ * reproduces all 128.  It is also bit-identical to what e2fsck accepted on a
+ * hand-built checksummed journal -- superblock, tag, descriptor tail and commit
+ * block -- each of which it then refused to replay when the value was
+ * deliberately corrupted.  See kernel/scripts/jbd2_csum_ref.py.
+ *
+ * The kernel builds with -mno-sse, so the SSE4.2 crc32 instruction is not
+ * available; this is the software table.  It is built on first use rather than
+ * being a 1 KiB literal, which costs 256*8 iterations once.
+ */
+static uint32_t j_crc_tab[256];
+static int      j_crc_ready;
+
+static void jbd2_crc_init(void) {
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++)
+            c = (c >> 1) ^ (0x82F63B78u & (uint32_t) - (int32_t)(c & 1));
+        j_crc_tab[i] = c;
+    }
+    j_crc_ready = 1;
+}
+
+/* Chaining: passing the previous result back in is the same as one pass over
+ * the concatenation, which the tag checksum relies on. */
+static uint32_t jbd2_chksum(uint32_t crc, const void *data, uint32_t len) {
+    const uint8_t *p = data;
+    if (!j_crc_ready) jbd2_crc_init();
+    while (len--) crc = (crc >> 8) ^ j_crc_tab[(crc ^ *p++) & 0xFF];
+    return crc;
+}
+
 /* ── tunables ────────────────────────────────────────────────────────────
  * STAGE_BLOCKS bounds journal memory (64 KiB with 1 KiB journal blocks, 256 KiB
  * with 4 KiB). It affects only how often a large write is split across
@@ -93,9 +138,15 @@ static inline uint16_t bswap16(uint16_t v) {
  * It is also the hard ceiling on how many tags one transaction may carry, in
  * both directions: replay refuses a transaction with more tags than this rather
  * than truncating it, because a truncated tag list leaves the data blocks
- * lining up against the wrong home blocks.  At 64 it is well under one
- * descriptor block's capacity (~124 tags in a 1 KiB block with 8-byte tags), so
- * a transaction is always a single descriptor.
+ * lining up against the wrong home blocks.
+ *
+ * "a transaction is always a single descriptor" is NOT a property of 64.  It
+ * holds for the plain tag layout (a 1 KiB descriptor takes ~122 eight-byte
+ * tags) and fails for csum_v3, where the sixteen-byte tag drops the same
+ * descriptor to 61 -- so 64 tags do not fit and a transaction silently grew a
+ * second descriptor.  JBD2_MAX_TAGS therefore only sizes the arrays; the real
+ * per-transaction limit is j_max_tags, which is 64 clamped to whatever one
+ * descriptor can actually hold.  See jbd2_tags_per_desc().
  */
 #define JBD2_STAGE_BLOCKS 64
 #define JBD2_MAX_TAGS     JBD2_STAGE_BLOCKS
@@ -115,7 +166,21 @@ static uint32_t j_sequence;    /* sequence of the next transaction to write */
 static uint32_t j_seq_next;    /* sequence handed to the transaction in flight */
 
 static int      j_tag_bytes;
+static int      j_max_tags;      /* tags per transaction: JBD2_STAGE_BLOCKS, but
+                                  * never more than one descriptor can hold */
 static uint32_t j_feature_incompat;
+static uint32_t j_feature_compat;
+
+/* csum_v2 / csum_v3, and the seed every checksum in the journal derives from.
+ *
+ * j_csum_seed = crc32c(~0, s_uuid, 16).  Note the seed is ~0 and not the
+ * journal UUID itself: the seed is a CRC *of* the UUID, so a journal whose
+ * checksum disagrees with everyone else's will not be accepted by the kernel
+ * either -- fs/jbd2/journal.c's load_super_journal() recomputes the superblock
+ * checksum and refuses the mount on a mismatch. */
+static int      j_csum_v2;      /* csum_v2 or csum_v3: block checksums are live */
+static int      j_csum_v3;      /* csum_v3: full 32-bit tag checksums, 16-byte tag */
+static uint32_t j_csum_seed;
 
 /* The journal's UUID, from s_uuid at offset 0x30 of the journal superblock.
  *
@@ -154,6 +219,7 @@ static uint8_t  *j_save;       /* holds a staged block across a mid-transaction
 
 static int jbd2_replay(void);
 static int jbd2_wrap(void);
+static int jbd2_tags_per_desc(void);
 static int jbd2_flush(void);
 static int jbd2_build_map(void);
 
@@ -298,11 +364,43 @@ static int jbd2_load_sb(void) {
     uint32_t s_start   = be32(*(uint32_t *)(j_sb + 28));  /* s_start: blocknr of
                                                            * start of log */
     j_feature_incompat = be32(*(uint32_t *)(j_sb + 40));
+    j_feature_compat   = be32(*(uint32_t *)(j_sb + 36));
     memcpy(j_uuid, j_sb + 48, 16);                        /* s_uuid @ 0x30 */
 
     if (j_blocksize < JBD2_MIN_BLOCK_SIZE || j_blocksize > JBD2_MAX_BLOCK_SIZE)
         return -1;
     if (j_maxlen <= j_first) return -1;
+
+    j_csum_v2 = (j_feature_incompat &
+                 (JBD2_FEATURE_INCOMPAT_CSUM_V2 | JBD2_FEATURE_INCOMPAT_CSUM_V3)) ? 1 : 0;
+    j_csum_v3 = (j_feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V3) ? 1 : 0;
+
+    /* A checksummed journal states which algorithm, and the kernel refuses to
+     * mount the journal outright if it is not CRC32C
+     * (fs/jbd2/journal.c: "JBD2: Unknown checksum type").  The field is a u8 at
+     * 0x50, not a be32 -- reading it as a word picks up its own padding and
+     * looks like a checksum type of 0x00000400. */
+    if (j_csum_v2) {
+        if (j_sb[0x50] != JBD2_CRC32C_CHKSUM) {
+            kprintf("ext3: journal declares checksummed but s_checksum_type is"
+                    " %u, not crc32c (%u)\n", j_sb[0x50], JBD2_CRC32C_CHKSUM);
+            return -1;
+        }
+        /* jbd2_superblock_csum(): crc32c(~0, sb, sizeof(journal_superblock_t))
+         * with s_checksum read as zero.  sizeof() is 0x400, which is exactly the
+         * JBD2_HEADER_SIZE we hold, so s_users is covered too. */
+        uint32_t stored = be32(*(uint32_t *)(j_sb + 0xFC));
+        *(uint32_t *)(j_sb + 0xFC) = 0;
+        uint32_t calc = jbd2_chksum(0xFFFFFFFFu, j_sb, JBD2_HEADER_SIZE);
+        *(uint32_t *)(j_sb + 0xFC) = le32(stored);
+        if (stored != calc) {
+            kprintf("ext3: journal superblock checksum is 0x%08x, computed"
+                    " 0x%08x\n", stored, calc);
+            return -1;
+        }
+    }
+
+    j_csum_seed = jbd2_chksum(0xFFFFFFFFu, j_uuid, 16);
 
     /* journal_tag_bytes(), transcribed. The tag is one struct truncated to a
      * feature-dependent length, so the no-feature case is 12-4 = 8 bytes. */
@@ -320,6 +418,25 @@ static int jbd2_load_sb(void) {
      * of that reading destroys the journal. Normalise to the first log block. */
     if (s_start < j_first || s_start >= j_maxlen) s_start = j_first;
 
+    /* One transaction, one descriptor block.  A multi-descriptor transaction is
+     * legal in the format, but the kernel's own writer never emits one for a
+     * transaction this size, and neither does e2fsprogs expect one: a csum_v3
+     * journal of 64 tags does not fit in a 1 KiB descriptor, and the descriptor
+     * the driver produced instead -- two full blocks, all checksums correct --
+     * left e2fsck unable to restore a single block of the 64, while exiting 0
+     * over the twenty or so that had no counterpart.  Clamping here means a
+     * large write is simply split across two transactions, each of which a real
+     * reader walks. */
+    {
+        int per_desc = jbd2_tags_per_desc();
+        j_max_tags = (per_desc < JBD2_STAGE_BLOCKS) ? per_desc : JBD2_STAGE_BLOCKS;
+        if (j_max_tags < 1) j_max_tags = 1;
+        if (j_max_tags < JBD2_STAGE_BLOCKS)
+            kprintf("ext3: %d-byte journal tags fit %d per descriptor block, so"
+                    " transactions are capped at %d tags (was %d)\n",
+                    j_tag_bytes, per_desc, j_max_tags, JBD2_STAGE_BLOCKS);
+    }
+
     j_head = s_start;
     return 0;
 }
@@ -330,6 +447,17 @@ static int jbd2_store_sb(uint32_t s_start, uint32_t s_sequence) {
     *(uint32_t *)(j_sb + 20) = le32(j_first);
     *(uint32_t *)(j_sb + 24) = le32(s_sequence);
     *(uint32_t *)(j_sb + 28) = le32(s_start);
+
+    /* s_checksum covers s_sequence and s_start, so it has to be recomputed
+     * every time either moves -- otherwise the superblock this writes is
+     * instantly invalid and the next mount refuses it, which would look like
+     * the journal being corrupt rather than the checksum being stale. */
+    if (j_csum_v2) {
+        j_sb[0x50] = JBD2_CRC32C_CHKSUM;
+        *(uint32_t *)(j_sb + 0xFC) = 0;
+        *(uint32_t *)(j_sb + 0xFC) = le32(jbd2_chksum(0xFFFFFFFFu, j_sb,
+                                                      JBD2_HEADER_SIZE));
+    }
 
     /* Write a whole block, not just the 1024-byte superblock. If the journal
      * block size exceeds JBD2_HEADER_SIZE, writing only the superblock would
@@ -388,10 +516,52 @@ static int jbd2_revoke(uint32_t fs_block) {
     return 0;
 }
 
+/* How many tags fit in one descriptor block.
+ *
+ * Single source of truth on purpose.  jbd2_txn_blocks() counts the blocks a
+ * transaction will occupy and jbd2_flush() then writes them; if those two
+ * disagree about how many tags a descriptor holds, the wrap check passes and
+ * the write runs off the end of the journal.  count_tags() on the read side
+ * uses the same bound: the payload after the 12-byte header, less the 16-byte
+ * UUID that follows the first tag, less the 4-byte descriptor tail when the
+ * journal is checksummed. */
+/* How many tags fit in one descriptor block, by the kernel's own rule.
+ *
+ * jbd2_journal_commit_transaction() does not fill a descriptor to the brim.
+ * It writes a tag, subtracts it from space_left, and then seals the block --
+ * writing LAST_TAG and submitting it -- as soon as there would not be room for
+ * one more tag *plus* a journal UUID *plus* the descriptor tail.  That reserve
+ * is what this loop reproduces, step for step, rather than a closed-form
+ * division.
+ *
+ * The closed form looks equivalent and is not.  For a 1 KiB block it gives 62
+ * sixteen-byte tags, which fits exactly (12 header + 16 UUID + 62*16 + 4 tail
+ * = 1024) and whose checksums are all correct -- and e2fsprogs cannot replay
+ * it.  The kernel's rule gives 61, leaving 20 bytes of slack.  Since the
+ * descriptor format is only ever *read* by other implementations, matching the
+ * reference writer exactly is the difference between a journal that works and
+ * one that is merely well-formed; there is nothing to gain by filling the block
+ * and a great deal to lose. */
+static int jbd2_tags_per_desc(void) {
+    uint32_t t = (uint32_t)j_tag_bytes;
+    uint32_t csum = j_csum_v2
+                  ? (uint32_t)sizeof(struct jbd2_journal_block_tail) : 0;
+    uint32_t space = j_blocksize - (uint32_t)sizeof(struct jbd2_header);
+    int n = 0;
+    for (;;) {
+        space -= t;                  /* the tag just written */
+        n++;
+        if (n == 1) space -= 16;     /* the journal UUID follows the first tag */
+        if (space < t + 16 + csum) break;
+        if (n > (int)(j_blocksize / t) + 2) return n;   /* cannot happen */
+    }
+    return n;
+}
+
 /* Blocks a transaction of n tags occupies: its descriptor blocks, its data
  * blocks, and its commit block. */
 static int jbd2_txn_blocks(int ntags) {
-    int per_desc = (int)(j_blocksize - sizeof(struct jbd2_header) - 16) / j_tag_bytes;
+    int per_desc = jbd2_tags_per_desc();
     if (per_desc < 1) return 1 << 30;      /* pathological: no tag fits at all */
     int ndesc = (ntags + per_desc - 1) / per_desc;
     if (ndesc < 1) ndesc = 1;
@@ -414,6 +584,34 @@ static int jbd2_txn_blocks(int ntags) {
  * block's capacity is the only thing that can make it read past the live
  * region.
  */
+/* crc32c for one data block's tag: crc32c(crc32c(seed, be32(seq), 4), data).
+ *
+ * The sequence is folded in first, which is what stops a data block from being
+ * valid in one transaction and the same in another: replaying an older log
+ * entry against a newer sequence number would otherwise authenticate stale
+ * content.  Two chained steps rather than one pass over a concatenation, so the
+ * chaining here is literally the chaining the reader performs.
+ *
+ * `data` is a full j_blocksize block: the staged copy on the write path, the
+ * freshly-read block on replay. */
+static uint32_t jbd2_tag_csum(uint32_t seq, const void *data) {
+    uint32_t s = le32(seq);
+    uint32_t c = jbd2_chksum(j_csum_seed, &s, 4);
+    return jbd2_chksum(c, data, j_blocksize);
+}
+
+/* A block-level checksum: the whole block with the checksum field read as zero.
+ * `off` is where that field lives -- the descriptor tail at the end of the
+ * block, or h_chksum[0] in a commit header.  Restored afterwards so the caller's
+ * buffer is left as it was found. */
+static uint32_t jbd2_block_csum(const void *blk, uint32_t off) {
+    uint8_t tmp[JBD2_MAX_BLOCK_SIZE];
+    if (off + 4 > j_blocksize) return 0;
+    memcpy(tmp, blk, j_blocksize);
+    memset(tmp + off, 0, 4);
+    return jbd2_chksum(j_csum_seed, tmp, j_blocksize);
+}
+
 static int jbd2_wrap(void) {
     /* Erase the log before reusing it.  This is what makes wrapping recoverable
      * at all, so it is worth being precise about why.
@@ -459,7 +657,7 @@ int jbd2_txn_begin(void) {
     /* Keep the largest possible transaction clear of the end of the journal, so
      * it cannot straddle the wrap point: replay walks the log linearly and would
      * read the tail of one transaction as the head of the next. */
-    if (j_head + (uint32_t)jbd2_txn_blocks(JBD2_MAX_TAGS) + JBD2_WRAP_MARGIN
+    if (j_head + (uint32_t)jbd2_txn_blocks(j_max_tags) + JBD2_WRAP_MARGIN
         >= j_maxlen) {
         /* Flush directly rather than through jbd2_txn_commit(), which would
          * decrement the depth this very function just incremented. */
@@ -522,10 +720,20 @@ static int jbd2_flush(void) {
      * and disagreed with where the write loop actually placed them -- the two
      * numbers came from different assumptions and only stayed in range because
      * JBD2_STAGE_BLOCKS happened to be below both. */
-    int per_desc = (int)(j_blocksize - sizeof(struct jbd2_header) - 16) / j_tag_bytes;
+    int per_desc = jbd2_tags_per_desc();
     if (per_desc < 1) return -1;
     int ndesc = (n + per_desc - 1) / per_desc;
     if (ndesc < 1) ndesc = 1;
+
+    /* The loop below can build a multi-descriptor transaction, and that is not
+     * merely untidy: e2fsck cannot replay one.  j_max_tags exists so this is
+     * unreachable, and the check is here so that raising it again is a loud
+     * failure rather than a journal that looks fine and recovers nothing. */
+    if (ndesc != 1)
+        kprintf("jbd2: WARNING %d tags over %d descriptor blocks; j_max_tags"
+                " is %d but a descriptor holds %d. e2fsck will not replay"
+                " this transaction.\n",
+                n, ndesc, j_max_tags, per_desc);
 
     if (jbd2_txn_blocks(n) + JBD2_WRAP_MARGIN > (int)(j_maxlen - j_head)) {
         kprintf("jbd2: transaction will not fit in journal (%d tags)\n", n);
@@ -573,12 +781,43 @@ static int jbd2_flush(void) {
             if (k == count - 1) flags |= JBD2_FLAG_LAST_TAG;
 
             uint8_t *t = j_descbuf + off;
-            *(uint32_t *)(t + 0) = le32(j_tag_block[i]);
-            /* t_checksum occupies the same slot in every tag size.  It is only
-             * meaningful under csum_v2/csum_v3, which this journal does not
-             * advertise, so it stays zero. */
-            *(uint16_t *)(t + 4) = le16(0);
-            *(uint16_t *)(t + 6) = le16(flags);
+            uint32_t blk = j_tag_block[i];
+            const void *data = j_stage + (uint32_t)j_tag_slot[i] * j_blocksize;
+
+            /* t_blocknr_high is written explicitly under 64BIT, which the
+             * previous version did not do at all -- the field was left as
+             * whatever the descriptor buffer already held.  It is always 0
+             * here because every block number this driver handles is a
+             * uint32_t (ext2_write_block_from's first argument); saying so is
+             * better than a shift that can only ever produce 0 and looks like
+             * it is handling more.  A 64-bit filesystem would need the real
+             * uint64_t plumbed through ext2_write_block_from first. */
+            uint32_t blk_high = 0;
+            (void)blk_high;
+
+            if (j_csum_v3) {
+                /* journal_block_tag3_t is a different struct, not a wider
+                 * version of the same one: the checksum moves out to the end
+                 * and the flags move down to offset 4, because t_checksum is a
+                 * full __be32 here rather than a __be16.  Writing the v2 layout
+                 * here would put the flags where the checksum belongs. */
+                *(uint32_t *)(t + 0)  = le32(blk);
+                *(uint32_t *)(t + 4)  = le32(flags);
+                *(uint32_t *)(t + 8)  = le32(blk_high);
+                *(uint32_t *)(t + 12) = le32(jbd2_tag_csum(seq, data));
+            } else {
+                *(uint32_t *)(t + 0) = le32(blk);
+                /* The tag checksum covers the data block, which is staged but
+                 * not yet written, so it is computed from j_stage here.  Only
+                 * the low 16 bits are stored under csum_v2
+                 * (jbd2_block_tag_csum_verify compares against cpu_to_be16). */
+                *(uint16_t *)(t + 4) = j_csum_v2
+                                     ? le16((uint16_t)jbd2_tag_csum(seq, data))
+                                     : le16(0);
+                *(uint16_t *)(t + 6) = le16(flags);
+                if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT)
+                    *(uint32_t *)(t + 8) = le32(blk_high);
+            }
             off += j_tag_bytes;
 
             if (k == 0) {
@@ -586,6 +825,15 @@ static int jbd2_flush(void) {
                 off += 16;
             }
         }
+
+        /* The tail covers the whole block, tags and UUID included, so it can
+         * only be computed once the tag stream above is final -- which is why
+         * it is not written per-tag. */
+        if (j_csum_v2)
+            *(uint32_t *)(j_descbuf + j_blocksize -
+                          sizeof(struct jbd2_journal_block_tail)) =
+                le32(jbd2_block_csum(j_descbuf, j_blocksize -
+                                     sizeof(struct jbd2_journal_block_tail)));
 
         if (jwrite(at++, j_descbuf) < 0) return -1;
     }
@@ -611,6 +859,18 @@ static int jbd2_flush(void) {
     c->h.h_magic     = le32(JBD2_MAGIC_NUMBER);
     c->h.h_blocktype = le32(JBD2_COMMIT_BLOCK);
     c->h.h_sequence  = le32(seq);
+
+    /* Under csum_v2/csum_v3 the commit block gets crc32c(seed, whole block)
+     * in h_chksum[0], and h_chksum_type / h_chksum_size are left at 0 --
+     * jbd2_commit_block_csum_set() zeroes them explicitly, so a nonzero
+     * h_chksum_type here would claim a checksum scheme this journal does not
+     * use.  h_chksum[0] sits at offset 16: three be32 header fields, then two
+     * u8 checksum descriptors and two padding bytes. */
+    if (j_csum_v2) {
+        uint32_t csum = jbd2_block_csum(j_descbuf, offsetof(struct jbd2_commit,
+                                                            h_chksum));
+        c->h_chksum[0] = le32(csum);
+    }
     if (jwrite(at++, j_descbuf) < 0) return -1;
 
     /* ── 4. home locations, only now that the commit is durable ── */
@@ -632,7 +892,7 @@ int jbd2_stage_block(uint32_t fs_block, const void *data) {
     if (!j_present) return 1;                     /* no journal: write directly */
     if (j_txn_depth == 0 && jbd2_txn_begin() < 0) return 1;
 
-    if (j_ntags >= JBD2_MAX_TAGS) {
+    if (j_ntags >= j_max_tags) {
         /* The staging area is full, so this write cannot wait for the caller's
          * commit point. End the transaction here and start another.
          *
@@ -731,11 +991,14 @@ int jbd2_in_transaction(void) { return j_present && j_txn_depth > 0; }
  * time it mattered -- a descriptor that no real reader can walk -- it would be
  * lost in the noise.  -1 is therefore reserved for a block that claims to be
  * part of the journal and is not walkable at all. */
-static int jbd2_replay_one(uint32_t *pos, uint32_t expect,
-                           uint32_t *tagbuf, uint8_t *tagdel, int *ntags) {
+static int jbd2_replay_one(uint32_t *pos, uint32_t expect, uint32_t *tagbuf,
+                           uint8_t *tagdel, uint32_t *tagcsum, int *ntags,
+                           int *nbad) {
     uint32_t at = *pos;
     int ntotal = 0;   /* every tag consumes one log block, deleted or not */
     int done = 0;
+    int csum_bad = 0; /* a data block failed its tag checksum */
+    *nbad = 0;
 
     for (int guard = 0; !done && guard < 256; guard++) {
         if (at >= j_maxlen) return 1;              /* end of the journal */
@@ -771,10 +1034,30 @@ static int jbd2_replay_one(uint32_t *pos, uint32_t expect,
          * UUID following any tag that does not claim SAME_UUID.  A 4-byte
          * rounded stride is what this driver used to use on both the write and
          * the read side, which is why the two agreed with each other and with
-         * nothing else. */
+         * nothing else.
+         *
+         * The walk stops short of the descriptor tail on a checksummed journal:
+         * count_tags() bounds itself by j_blocksize - sizeof(tail), so the last
+         * four bytes of the block are not a tag and reading them as one is how
+         * a replay walks off the end of a valid descriptor. */
         int off = (int)sizeof(struct jbd2_header);
-        while (off + (int)j_tag_bytes <= (int)j_blocksize) {
+        int limit = (int)j_blocksize;
+        if (j_csum_v2) limit -= (int)sizeof(struct jbd2_journal_block_tail);
+        while (off + (int)j_tag_bytes <= limit) {
             uint8_t *t = j_iobuf + off;
+
+            /* t_flags is read as a be16 at tag+6 for *every* tag size, csum_v3
+             * included.  That looks like a mismatch against the v3 layout,
+             * where journal_block_tag3_t::t_flags is a be32 at tag+4, and it is
+             * a deliberate asymmetry in the kernel rather than a quirk of this
+             * port: count_tags() and jbd2_do_replay() both read be16 at +6
+             * while commit.c writes be32 at +4.  It is safe because the flag
+             * values are all <= JBD2_FLAG_MASK (0x0F), so a be32 of one lands in
+             * bytes 4..7 as 00 00 00 ff -- and bytes 6,7, read as a be16, give
+             * back 0x00ff.  Reading the be32 at +4 instead yields the same
+             * number, so both work; the point is that the format the kernel
+             * *writes* is the one to reproduce, and what it reads back is not
+             * a promise about the high 16 bits. */
             uint16_t flags = be16(*(uint16_t *)(t + 6));
             if (flags & JBD2_FLAG_ESCAPE) { done = 1; break; }
 
@@ -786,13 +1069,43 @@ static int jbd2_replay_one(uint32_t *pos, uint32_t expect,
                         " stopping replay\n", expect, JBD2_MAX_TAGS);
                 return -1;
             }
-            tagbuf[ntotal] = be32(*(uint32_t *)(t + 0));
+            uint32_t blk = be32(*(uint32_t *)(t + 0));
+            /* On a 64-bit journal t_blocknr holds only bits 0-31 and
+             * t_blocknr_high (at tag+8) the rest, so the high word has to be
+             * folded back in or a large filesystem silently replays every tag
+             * to a low block number.  read_tag_block() does it as a __be64
+             * load; widening through uint64_t avoids the `<< 32` that is
+             * undefined on a 32-bit int. */
+            uint64_t wide = blk;
+            if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT)
+                wide |= (uint64_t)be32(*(uint32_t *)(t + 8)) << 32;
+            blk = (uint32_t)wide;
+            tagbuf[ntotal] = blk;
             tagdel[ntotal] = (flags & JBD2_FLAG_DELETED) ? 1 : 0;
+            tagcsum[ntotal] = j_csum_v3
+                            ? be32(*(uint32_t *)(t + 12))
+                            : (uint32_t)be16(*(uint16_t *)(t + 4));
             ntotal++;
 
             off += j_tag_bytes;
             if (!(flags & JBD2_FLAG_SAME_UUID)) off += 16;
             if (flags & JBD2_FLAG_LAST_TAG) { done = 1; break; }
+        }
+
+        /* A descriptor whose own checksum is wrong cannot be walked with any
+         * confidence: the tags inside it are exactly what the checksum covers,
+         * so a bad tail means the tag stream is untrusted.  The kernel aborts
+         * recovery here too (jbd2_descriptor_block_csum_verify -> goto failed). */
+        if (j_csum_v2) {
+            uint32_t tail_at = j_blocksize - sizeof(struct jbd2_journal_block_tail);
+            uint32_t stored = be32(*(uint32_t *)(j_iobuf + tail_at));
+            uint32_t calc = jbd2_block_csum(j_iobuf, tail_at);
+            if (stored != calc) {
+                kprintf("jbd2: descriptor at journal block %u has checksum"
+                        " 0x%08x, computed 0x%08x; replay stopped\n",
+                        dblk, stored, calc);
+                return -1;
+            }
         }
     }
     if (!done) return -1;      /* hit the guard, or the commit was never reached */
@@ -804,6 +1117,25 @@ static int jbd2_replay_one(uint32_t *pos, uint32_t expect,
     for (int i = 0; i < ntotal; i++) {
         if (at >= j_maxlen) return 1;       /* transaction ran off the log */
         if (jread_block(at, j_iobuf) < 0) return -1;
+
+        /* Verify the data block before believing it.  A tag checksum that fails
+         * does not invalidate the rest of the transaction, so that block is
+         * dropped and the walk continues -- the same shape as the kernel's
+         * jbd2_block_tag_csum_verify failure, which skips the write and carries
+         * on with -EFSBADCRC.  Under csum_v2 only the low 16 bits were stored,
+         * so only those 16 bits are a claim to check. */
+        if (j_csum_v2) {
+            uint32_t calc = jbd2_tag_csum(expect, j_iobuf);
+            uint32_t mask = j_csum_v3 ? 0xFFFFFFFFu : 0xFFFFu;
+            if ((calc & mask) != (tagcsum[i] & mask)) {
+                kprintf("jbd2: data block %u in log fails its tag checksum;"
+                        " not replayed\n", tagbuf[i]);
+                csum_bad = 1;
+                at++;
+                continue;
+            }
+        }
+
         if (!tagdel[i])
             memcpy(j_stage + (uint32_t)i * j_blocksize, j_iobuf, j_blocksize);
         at++;
@@ -819,6 +1151,26 @@ static int jbd2_replay_one(uint32_t *pos, uint32_t expect,
     if (be32(*(uint32_t *)(j_iobuf)) != JBD2_MAGIC_NUMBER) return 1;
     if (be32(*(uint32_t *)(j_iobuf + 4)) != JBD2_COMMIT_BLOCK) return 1;
     if (be32(*(uint32_t *)(j_iobuf + 8)) != expect) return 1;
+
+    /* A commit block whose checksum is wrong is a commit block that cannot be
+     * trusted to mean "this transaction is complete", so the transaction is
+     * discarded whole -- nothing above has been written home yet, which is the
+     * only reason discarding is free.  The kernel is more forgiving here
+     * (jbd2_commit_block_csum_verify_partial accepts a torn commit block, and a
+     * stale commit_time is ignored), but both paths end in "do not apply this
+     * transaction", and refusing is the side that cannot lose data. */
+    if (j_csum_v2) {
+        uint32_t stored = be32(*(uint32_t *)(j_iobuf + offsetof(struct jbd2_commit,
+                                                              h_chksum)));
+        uint32_t calc = jbd2_block_csum(j_iobuf, offsetof(struct jbd2_commit,
+                                                         h_chksum));
+        if (stored != calc) {
+            kprintf("jbd2: commit block for transaction %u has checksum"
+                    " 0x%08x, computed 0x%08x; transaction discarded\n",
+                    expect, stored, calc);
+            return 1;
+        }
+    }
     at++;
 
     for (int i = 0; i < ntotal; i++)
@@ -826,27 +1178,44 @@ static int jbd2_replay_one(uint32_t *pos, uint32_t expect,
             ext2_write_block_from(tagbuf[i], j_stage + (uint32_t)i * j_blocksize);
 
     *ntags = ntotal;
+    *nbad = csum_bad;
     *pos = at;
     return 0;
 }
+
+/* Set when replay stopped short of the whole log: either a block in the middle
+ * of it was not walkable, or a journalled block failed its checksum and so was
+ * left with whatever the filesystem last wrote to it.  The log tail must not be
+ * advanced past either -- see jbd2_init(). */
+static int j_replay_incomplete;
 
 static int jbd2_replay(void) {
     uint32_t pos = j_first;
     uint32_t seq = j_sequence;
     uint32_t tagbuf[JBD2_MAX_TAGS];
     uint8_t  tagdel[JBD2_MAX_TAGS];
-    int applied = 0, malformed = 0;
+    uint32_t tagcsum[JBD2_MAX_TAGS];
+    int applied = 0, malformed = 0, badblocks = 0;
 
     while (pos < j_maxlen) {
-        int n = 0;
-        int r = jbd2_replay_one(&pos, seq, tagbuf, tagdel, &n);
+        int n = 0, nbad = 0;
+        int r = jbd2_replay_one(&pos, seq, tagbuf, tagdel, tagcsum, &n, &nbad);
         if (r < 0) { malformed = 1; break; }
         if (r > 0) break;                      /* log ended; expected */
+        badblocks += nbad;
         applied++;
         seq++;
     }
     j_head = pos;
     j_sequence = seq;
+    j_replay_incomplete = malformed || badblocks;
+    /* A data block that failed its tag checksum was left alone, so whatever the
+     * filesystem last wrote to it is still there. That is the safe outcome, but
+     * it is not a clean mount and saying so beats letting a later e2fsck find it
+     * with no explanation. */
+    if (badblocks)
+        kprintf("jbd2: WARNING %d journalled block(s) failed their checksum"
+                " and were not replayed.\n", badblocks);
     if (malformed)
         kprintf("jbd2: WARNING replay stopped after %d transaction(s) at"
                 " journal block %u: a journal block there is not walkable.\n"
@@ -908,26 +1277,53 @@ int jbd2_init(uint32_t journal_inode) {
      * still exited 0.  Writing 8-byte tags for a featureless journal is a real
      * JBD2 journal, so that is what is done here.
      *
-     * Checksummed journals are refused rather than faked.  csum_v2 and csum_v3
-     * need CRC32C seeded from s_uuid over a different byte range for each of
-     * the three checksums, and a journal that claims a checksum the reader
-     * computes differently is worse than no journal at all.  Falling back to
-     * journalless ext2 is the existing, tested degradation path. */
-    if (j_feature_incompat) {
-        const char *why = "unknown";
-        if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V3) why = "csum_v3";
-        else if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT) why = "64bit";
-        else if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V2) why = "csum_v2";
-        else if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT)
-            why = "async_commit";
-        else if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_REVOKE)
-            why = "revoke";
-        kprintf("ext3: journal needs features 0x%08x (%s) -- not implemented,"
-                " mounting without a journal\n", j_feature_incompat, why);
+     * Checksummed journals are no longer refused.  csum_v2 and csum_v3 need
+     * CRC32C seeded from s_uuid over a different byte range for each of the
+     * four checksums, and a journal that claims a checksum the reader computes
+     * differently is worse than no journal at all -- so they are implemented and
+     * verified on both sides instead of faked, and every value written was
+     * checked against e2fsprogs before being believed.
+     *
+     * What is still refused is what remains genuinely unimplemented, and the
+     * reason each one is refused is a correctness one, not a tidiness one:
+     *
+     *  - FAST_COMMIT puts a second log in front of the real one, and its
+     *    s_num_fc_blks changes where the log even starts.  Reading one as if it
+     *    were an ordinary log would walk into entirely the wrong blocks.
+     *  - ASYNC_COMMIT lets a writer put the commit block *before* the data it
+     *    commits, so the log's block order stops being "descriptors, then data,
+     *    then commit" and the walk in jbd2_replay_one() would line data blocks
+     *    up with the wrong tags.  We write in the strict order regardless, but we
+     *    must not *read* a log written in the other one.
+     *  - COMPAT_CHECKSUM is checksum v1, a different algorithm entirely
+     *    (CRC32-BE accumulated across descriptor, data and commit rather than
+     *    CRC32C per block).  The kernel forbids v1 and v2 coexisting, so this is
+     *    never seen together with the above.
+     *
+     * REVOKE is accepted, and the asymmetry is deliberate.  This driver does not
+     * write revoke blocks; instead it drops a revoked block's tag from the
+     * descriptor, which gives replay the same guarantee -- no tag, so nothing to
+     * restore.  On the read side a revoke block between descriptors is skipped
+     * as one journal block, so a journal that does contain them replays
+     * correctly.  Neither direction is compromised by not writing them. */
+    if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_FAST_COMMIT) {
+        kprintf("ext3: journal needs feature fast_commit (0x%08x) -- not"
+                " implemented, mounting without a journal\n", j_feature_incompat);
         jbd2_free_buffers();
         return -1;
     }
-    j_tag_bytes = JBD2_TAG_SIZE_DEFAULT;      /* 8: blocknr + cksum + flags */
+    if (j_feature_incompat & JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT) {
+        kprintf("ext3: journal needs feature async_commit (0x%08x) -- not"
+                " implemented, mounting without a journal\n", j_feature_incompat);
+        jbd2_free_buffers();
+        return -1;
+    }
+    if (j_feature_compat & JBD2_FEATURE_COMPAT_CHECKSUM) {
+        kprintf("ext3: journal needs checksum v1 (0x%08x) -- not implemented,"
+                " mounting without a journal\n", j_feature_compat);
+        jbd2_free_buffers();
+        return -1;
+    }
 
     /* One bit per filesystem block, not per journal block. */
     uint32_t fs_blocks = ext2_block_count();
@@ -978,6 +1374,45 @@ int jbd2_init(uint32_t journal_inode) {
     jbd2_reset_txn();
 
     int n = jbd2_replay();
+
+    /* Make the log's entry point durable now, not at unmount.
+     *
+     * s_start and s_sequence are the only way a reader finds its way into the
+     * log: mke2fs leaves them at 0 and 1 as a "log never used" marker, and block
+     * 0 of the journal is the superblock itself, not a transaction.  A reader
+     * that honours that literally starts replaying at the superblock, loses its
+     * place in the sequence, and leaves the filesystem a wreck while still
+     * exiting 0.  That is not hypothetical: e2fsck does exactly this, and the
+     * only symptom is fifteen inodes cleared and every file gone.
+     *
+     * The kernel writes the superblock on every commit because its tail really
+     * does advance each time.  This driver never checkpoints, so within an epoch
+     * the tail is fixed -- it is the start of the epoch, and jbd2_wrap() has
+     * already written that pair.  So one write after replay is both sufficient
+     * and correct: replaying from the epoch start converges on the newest
+     * state because the transactions are applied in sequence order, and
+     * advancing the tail to the head afterwards is the checkpoint that replay
+     * has just earned.  The next mount then starts at the head and finds
+     * nothing to do, instead of re-reading the whole log.
+     *
+     * jbd2_shutdown() also writes it, but that is not a substitute: the
+     * interesting case is a crash, and a crash is precisely the case where
+     * shutdown does not run.  Waiting for it leaves every unclean mount with a
+     * journal no real reader can walk.
+     *
+     * Skipped when the replay did not finish, because the tail would then claim
+     * those transactions are no longer needed when in fact some of their data
+     * never made it home. */
+    if (j_replay_incomplete) {
+        kprintf("jbd2: log entry point left at block %u sequence %u; replay was"
+                " not clean, so the tail was not advanced past it\n",
+                j_first, j_sequence);
+    } else if (jbd2_store_sb(j_head, j_sequence) < 0) {
+        kprintf("jbd2: WARNING could not record the log entry point"
+                " (block %u sequence %u); the journal stays as it was\n",
+                j_head, j_sequence);
+    }
+
     kprintf("ext3: journal on inode %u, %u x %u B, %d B tags, log at block %u\n",
             j_inum, j_maxlen, j_blocksize, j_tag_bytes, j_head);
     if (n > 0)
