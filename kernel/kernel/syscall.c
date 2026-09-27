@@ -87,7 +87,6 @@ extern void user_mode_force_return(void);
 #define LINUX_SCHED_YIELD 24
 #define LINUX_GETDENTS    78
 #define LINUX_OPENAT      257
-#define LINUX_NEWFSTAT    137
 #define LINUX_FACCESSAT   269
 #define LINUX_READLINK    89
 #define LINUX_READLINKAT  267
@@ -101,8 +100,12 @@ extern void user_mode_force_return(void);
 #define LINUX_FCNTL        72
 #define LINUX_GETTID       186
 #define LINUX_FUTEX        202
-#define LINUX_MADVISE      233
-#define LINUX_GETRUSAGE    165
+/* x86-64 numbers, NOT the aarch64/generic ones these were originally taken
+ * from: madvise is 28 (233 is aarch64 epoll_ctl) and getrusage is 98
+ * (165 is x86-64 mount).  With the wrong numbers the handler sat on an
+ * unrelated syscall and the real one fell through to ENOSYS. */
+#define LINUX_MADVISE      28
+#define LINUX_GETRUSAGE    98
 #define LINUX_PRCTL        157
 #define LINUX_SET_TID_ADDRESS 218
 #define LINUX_SET_ROBUST_LIST   273
@@ -111,12 +114,13 @@ extern void user_mode_force_return(void);
 #define LINUX_PIPE2        293
 #define LINUX_PREAD64      17
 #define LINUX_PWRITE64     18
-#define LINUX_READLINKAT   267
 #define LINUX_STATX        332
 
 /* Additional Linux syscalls used by real glibc/musl binaries */
 #define LINUX_KILL        62
-#define LINUX_GETPPID     64
+/* x86-64 getppid is 110; 64 is x86-64 semget, so this used to hand the
+ * getppid handler to semget and leave the real getppid at ENOSYS. */
+#define LINUX_GETPPID     110
 #define LINUX_GETEUID     107
 #define LINUX_GETEGID     108
 #define LINUX_TGKILL      234
@@ -1087,25 +1091,6 @@ int64_t linux_syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
         if (copy_to_user(a2, stbuf, LINUX_STAT_SZ) < 0) return -LINUX_ENOMEM;
         return 0;
     }
-    case LINUX_NEWFSTAT: {
-        /* newfstatat: dirfd, path, statbuf, flags */
-        int dirfd = (int)a1;
-        char path[FS_PATH_MAX];
-        if (a2) {
-            if (copy_from_user(path, a2, FS_PATH_MAX - 1) < 0) return -LINUX_EINVAL;
-            path[FS_PATH_MAX - 1] = 0;
-        } else {
-            if (dirfd != LINUX_AT_FDCWD && fd_verify(dirfd)) {
-                strcpy(path, fd_table[dirfd].path);
-            } else {
-                path[0] = '/'; path[1] = 0;
-            }
-        }
-        uint8_t stbuf[LINUX_STAT_SZ];
-        if (do_stat_fill(path, stbuf) < 0) return -LINUX_ENOENT;
-        if (copy_to_user(a3, stbuf, LINUX_STAT_SZ) < 0) return -LINUX_ENOMEM;
-        return 0;
-    }
     case LINUX_LSEEK: {
         int fd = (int)a1;
         int64_t off = (int64_t)a2;
@@ -1518,7 +1503,7 @@ int64_t linux_syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
         }
         return gated_kill(pid, sig);
     }
-    /* ── GETPPID (64) ── */
+    /* ── GETPPID (110) ── */
     case LINUX_GETPPID:
         return (uint64_t)proc_getppid();
     /* ── GETEUID (107) / GETEGID (108) ── */
@@ -1673,9 +1658,6 @@ int64_t linux_syscall_handler(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3,
         }
         return (uint64_t)pid;
     }
-    /* ── GETPPID ── */
-    case 110:
-        return (uint64_t)proc_getppid();
     /* ── SELECT (stub: return ready on stdin) ── */
     case 23: {
         int nfds = (int)a1;

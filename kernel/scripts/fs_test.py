@@ -668,6 +668,23 @@ def run(fstype, keep):
     step(not panic, "no OWPANIC in serial log")
     step(not pf, "no page fault in serial log")
 
+    # linux-probe is a real assertion now: pass() checks the return value and
+    # the program exits nonzero if any check failed, so this catches syscall
+    # regressions that used to print "OK" unconditionally.  Genuine stubs
+    # (ENOSYS) are reported as LP[GAP] and deliberately not counted here.
+    m = re.search(rb"LPROBE: checks=(\d+) failed=(\d+)", g.raw)
+    fails = re.findall(rb"LP\[FAIL\] ([^\n:]+)", g.raw)
+    if m:
+        nchecks, nfailed = int(m.group(1)), int(m.group(2))
+        step(nfailed == 0,
+             f"linux-probe: all {nchecks} syscall assertions pass",
+             f"failed={nfailed}"
+             + (f" first={fails[0].decode(errors='replace')}" if fails else ""),
+             evidence=", ".join(f.decode(errors="replace") for f in fails))
+    else:
+        step(False, "linux-probe ran and reported a summary",
+             "no 'LPROBE: checks=' line in serial log")
+
     allok = all(results)
     lines.insert(0, f"VERDICT: {'ALL STEPS PASSED' if allok else 'FAILURES PRESENT'}"
                     f"  ({fstype})")
