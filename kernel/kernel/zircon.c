@@ -409,7 +409,7 @@ void zircon_launch_elf(const char *path) {
     kprintf("zircon: launching '%s' entry=0x%lx rsp=0x%lx\n", path, entry, rsp);
 
     /* Create process so syscalls (brk, mmap, exit) work */
-    proc_create(path, entry, stack);
+    proc_create(path, entry, stack, LEVEL_USER);
 
     user_mode_set_return(shell_exec_done);
     user_mode_begin();

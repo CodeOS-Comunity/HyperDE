@@ -327,7 +327,7 @@ int container_start(int id) {
     if (!proc) {
         rsp = elf_setup_stack(stack, entry, 1, init_argv, 0, 0, &auxv);
         if (!rsp) return -1;
-        proc_create(full_path, entry, stack);
+        proc_create(full_path, entry, stack, LEVEL_USER);
         proc = proc_current();
         if (!proc) return -1;
     } else {
@@ -551,7 +551,7 @@ int container_exec(int id, const char *path, int argc, char **argv, char **envp)
     if (!cur) {
         rsp = elf_setup_stack(stack, entry, argc, argv, envc, envp, &auxv);
         if (!rsp) return -1;
-        proc_create(full_path, entry, stack);
+        proc_create(full_path, entry, stack, LEVEL_USER);
         cur = proc_current();
         if (!cur) return -1;
     } else {

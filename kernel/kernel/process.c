@@ -36,7 +36,8 @@ int proc_init(void) {
     return 0;
 }
 
-int proc_create(const char *name, uint64_t entry, uint64_t stack_top) {
+int proc_create(const char *name, uint64_t entry, uint64_t stack_top,
+                proc_level_t level) {
     int slot = find_proc_slot();
     if (slot < 0) return -1;
 
@@ -58,12 +59,18 @@ int proc_create(const char *name, uint64_t entry, uint64_t stack_top) {
     p->children = 0;
     p->sibling = 0;
     p->next = 0;
+    p->level = level;
     setup_fds(p);
 
     if (!current_process)
         current_process = p;
 
     return p->pid;
+}
+
+int proc_create_level(const char *name, uint64_t entry, uint64_t stack_top,
+                proc_level_t level) {
+    return proc_create(name, entry, stack_top, level);
 }
 
 int proc_fork(void) {
@@ -522,4 +529,96 @@ void pipe_close(pipe_t *p, int writer) {
         p->open = 0;
         pmm_free_page(virt_to_phys((uint64_t)p));
     }
+}
+
+/* ── Task / security levels ── */
+
+int proc_set_level(int pid, proc_level_t level) {
+    if (level < LEVEL_CONTAINER || level > LEVEL_KERNEL) return -1;
+    for (int i = 0; i < PROC_MAX; i++) {
+        if (proc_table[i].pid == pid && proc_table[i].state != PROC_DEAD) {
+            proc_table[i].level = level;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+proc_level_t proc_get_level(int pid) {
+    for (int i = 0; i < PROC_MAX; i++) {
+        if (proc_table[i].pid == pid && proc_table[i].state != PROC_DEAD)
+            return proc_table[i].level;
+    }
+    /* Unreachable pid.  Report LEVEL_KERNEL rather than LEVEL_CONTAINER: the
+     * authorization check in proc_can_interfere() must not hand out a low
+     * level for a pid that does not exist, or `kill <any number>` would
+     * always be permitted.  Denying is the safe direction. */
+    return LEVEL_KERNEL;
+}
+
+/* Can a task at killer_level interfere with (signal/kill) the task
+ * at target_pid?  A task may act on anything at or below its own level,
+ * and never on anything above.  This keeps level-3 kernel apps safe from
+ * every lower level, and keeps a level-2 shell from reaching the level-3
+ * processes that make up the window protocol and the android containers.
+ *
+ * An unreachable pid is denied: proc_get_level() reports LEVEL_KERNEL for a
+ * pid that does not exist, so "not found" can never be mistaken for a
+ * low-privilege target that just happens to be free to kill. */
+int proc_can_interfere(int killer_level, int target_pid) {
+    if (killer_level < LEVEL_CONTAINER || killer_level > LEVEL_KERNEL) return 0;
+    if (!proc_exists(target_pid)) return 0;
+    return killer_level >= proc_get_level(target_pid);
+}
+
+/* Iterate the process table and print every live task with its level.
+ * Returns the count of live tasks. */
+int proc_list(void) {
+    int n = 0;
+    static const char *const lvl_name[] = { "container", "os", "user", "kernel" };
+    kprintf("  PID  NAME                   STATE      LEVEL\n");
+    for (int i = 0; i < PROC_MAX; i++) {
+        process_t *p = &proc_table[i];
+        if (p->state == PROC_DEAD || p->state == 0) continue;
+        const char *st;
+        switch (p->state) {
+            case PROC_CREATED: st = "created"; break;
+            case PROC_READY:   st = "ready";   break;
+            case PROC_RUNNING: st = "running"; break;
+            case PROC_SLEEPING:st = "sleeping";break;
+            case PROC_ZOMBIE:  st = "zombie";  break;
+            default:           st = "?";       break;
+        }
+        /* A level is 4 enum values; index defensively so a corrupt table
+         * cannot walk off the end of lvl_name. */
+        int lv = (int)p->level;
+        const char *lvn = (lv >= 0 && lv <= LEVEL_KERNEL) ? lvl_name[lv] : "?";
+        kprintf("  %4d %-22s %-10s %d %s\n", p->pid, p->name, st, lv, lvn);
+        n++;
+    }
+    if (n == 0) kprintf("  (no tasks)\n");
+    return n;
+}
+
+/* Does a live task with this pid exist?  Needed to tell "no such task" apart
+ * from "that task is above your level" -- without it, an unreachable pid
+ * reports the fallback level and the error message blames the wrong thing. */
+int proc_exists(int pid) {
+    for (int i = 0; i < PROC_MAX; i++) {
+        if (proc_table[i].pid == pid && proc_table[i].state != PROC_DEAD)
+            return 1;
+    }
+    return 0;
+}
+
+/* Look up a task by pid and copy its name into buf.
+ * Returns 0 on success, -1 if not found. */
+int proc_get_pid_name(int pid, char *buf, int len) {
+    for (int i = 0; i < PROC_MAX; i++) {
+        if (proc_table[i].pid == pid && proc_table[i].state != PROC_DEAD) {
+            strncpy_safe(buf, proc_table[i].name, len);
+            return 0;
+        }
+    }
+    return -1;
 }

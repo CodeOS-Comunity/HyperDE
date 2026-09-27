@@ -41,11 +41,28 @@
 #include "security.h"
 #include "ad_block.h"
 #include "version.h"
+#include "process.h"
 #include "netdev.h"
 static void run_builtin(int argc, char **argv);
 static int str_to_int(const char *s);
 extern void cmd_waydroid(int argc, char **argv);
 static void cmd_systemm(int argc, char **argv);
+
+/* Shell's own security level (default user).
+ * systemm task commands enforce this as the caller's level. */
+proc_level_t shell_level = LEVEL_USER;
+
+/* Human-readable name for a security level, for the systemm task output.
+ * Kept next to shell_level because that is what the levels are relative to. */
+static const char *level_name(proc_level_t lvl) {
+    switch (lvl) {
+        case LEVEL_CONTAINER: return "container";
+        case LEVEL_OS:        return "os";
+        case LEVEL_USER:      return "user";
+        case LEVEL_KERNEL:    return "kernel";
+        default:              return "?";
+    }
+}
 
 #define CMD_BUF_SIZE 256
 #define MAX_ARGS     32
@@ -2117,7 +2134,12 @@ void shell_exec_done(void) {
 }
 
 extern uint64_t syscall_kernel_rsp;
+static void cmd_exec_level(int argc, char **argv, proc_level_t level);
 static void cmd_exec(int argc, char **argv) {
+    cmd_exec_level(argc, argv, LEVEL_USER);
+}
+
+static void cmd_exec_level(int argc, char **argv, proc_level_t level) {
     if (argc < 2) { kprintf("usage: exec <elf-file>\n"); return; }
     uint64_t entry, stack;
     elf_auxv_info_t auxv;
@@ -2128,8 +2150,9 @@ static void cmd_exec(int argc, char **argv) {
     uint64_t rsp = elf_setup_stack(stack, entry, argc > 1 ? argc - 1 : 0,
                                      argc > 1 ? argv + 1 : 0,
                                      0, 0, &auxv);
-    kprintf("exec: starting '%s' at entry 0x%lx, rsp=0x%lx\n", argv[1], entry, rsp);
-    proc_create(argv[1], entry, stack);
+    kprintf("exec: starting '%s' at entry 0x%lx, rsp=0x%lx (level %d)\n",
+            argv[1], entry, rsp, level);
+    proc_create(argv[1], entry, stack, level);
     user_mode_set_return(shell_exec_done);
     user_mode_begin();
     thread_t *cur = sched_current();
@@ -2938,8 +2961,9 @@ static void cmd_kill(void) {
 }
 
 static void cmd_ps(void) {
-    kprintf("  PID  COMMAND\n");
-    kprintf("    0  kernel\n");
+    kprintf("Processes:\n");
+    extern int proc_list(void);
+    proc_list();
 }
 
 /* ---------- new commands batch 2 ---------- */
@@ -4742,6 +4766,128 @@ static void cmd_systemm(int argc, char **argv) {
         }
         extern void cmd_exec(int argc, char **argv);
         cmd_exec(argc - 2, argv + 2);
+        return;
+    }
+
+    if (strcmp(sub, "task") == 0) {
+        if (argc < 3) {
+            kprintf("usage: systemm task <list|info|kill|run> ...\n");
+            return;
+        }
+        const char *tsub = argv[2];
+
+        if (strcmp(tsub, "list") == 0) {
+            kprintf("Tasks:\n");
+            proc_list();
+            return;
+        }
+
+        if (strcmp(tsub, "info") == 0 && argc >= 4) {
+            int pid = sysm_atoi(argv[3]);
+            if (!proc_exists(pid)) {
+                kprintf("task info: no task with pid %d\n", pid);
+                return;
+            }
+            char name[PROC_NAME_MAX] = "?";
+            proc_get_pid_name(pid, name, sizeof(name));
+            kprintf("task %d: %s (level %d, %s)\n", pid, name,
+                    (int)proc_get_level(pid), level_name(proc_get_level(pid)));
+            return;
+        }
+
+        if (strcmp(tsub, "set") == 0 && argc >= 5) {
+            int pid = sysm_atoi(argv[3]);
+            int lvl = sysm_atoi(argv[4]);
+            if (!proc_exists(pid)) {
+                kprintf("task set: no task with pid %d\n", pid);
+                return;
+            }
+            if (lvl < 0 || lvl > LEVEL_KERNEL) {
+                kprintf("task set: level must be 0..3\n");
+                return;
+            }
+            /* Never a promotion: a task may be re-levelled to anything at or
+             * below the caller's own level, never above it.  Same rule as
+             * `task run`, and the reason `--level 3` is refused from the
+             * level-2 shell. */
+            if (lvl > shell_level) {
+                kprintf("task set: level %d (%s) may not promote a task to level %d (%s)\n",
+                        shell_level, level_name(shell_level), lvl, level_name((proc_level_t)lvl));
+                return;
+            }
+            if (proc_set_level(pid, (proc_level_t)lvl) < 0)
+                kprintf("task set: pid %d: failed\n", pid);
+            else
+                kprintf("task %d: level set to %d (%s)\n", pid, lvl,
+                        level_name((proc_level_t)lvl));
+            return;
+        }
+
+        if (strcmp(tsub, "kill") == 0 && argc >= 4) {
+            int pid = sysm_atoi(argv[3]);
+            int sig = argc >= 5 ? sysm_atoi(argv[4]) : 9;
+            if (!proc_exists(pid)) {
+                kprintf("task kill: no task with pid %d\n", pid);
+                return;
+            }
+            if (!proc_can_interfere(shell_level, pid)) {
+                kprintf("task kill: level %d (%s) may not signal task %d at level %d (%s)\n",
+                        shell_level, level_name(shell_level), pid,
+                        (int)proc_get_level(pid), level_name(proc_get_level(pid)));
+                return;
+            }
+            int r = proc_kill(pid, sig);
+            if (r == 0)
+                kprintf("sent signal %d to task %d\n", sig, pid);
+            else
+                kprintf("task kill: pid %d: failed (rc=%d)\n", pid, r);
+            return;
+        }
+
+        if (strcmp(tsub, "run") == 0 && argc >= 4) {
+            /* Default is the caller's own level, not a fixed one: the shell
+             * is level 2, so an unqualified `task run` starts a level-2 task
+             * and the "not above yourself" rule below does not reject it. */
+            proc_level_t lvl = shell_level;
+            int argi = 3;
+            if (argc >= 5 && strcmp(argv[3], "--level") == 0) {
+                int want = sysm_atoi(argv[4]);
+                if (want < 0 || want > LEVEL_KERNEL) {
+                    kprintf("task run: level must be 0..3\n");
+                    return;
+                }
+                lvl = (proc_level_t)want;
+                argi = 5;
+            }
+            if (argi >= argc) {
+                kprintf("usage: systemm task run [--level N] <program> [args...]\n");
+                return;
+            }
+            /* No promotion: you can start something at your own level or
+             * below, never above.  Without this, `--level 3` would be a
+             * privilege escalation out of the level-2 shell. */
+            if (lvl > shell_level) {
+                kprintf("task run: level %d (%s) may not start a task at level %d (%s)\n",
+                        shell_level, level_name(shell_level), (int)lvl, level_name(lvl));
+                return;
+            }
+            int targc = argc - argi;
+            if (targc > 30) targc = 30;
+            /* cmd_exec_level() takes the ELF at argv[1], not argv[0]: it is the
+             * body of the `exec` builtin, where argv[0] is the command name it
+             * was invoked as and argv[1] the file.  Prepend a placeholder so
+             * the program path lands where exec expects it. */
+            static char *task_argv[33];
+            task_argv[0] = (char *)"systemm task run";
+            for (int i = 0; i < targc; i++)
+                task_argv[i + 1] = argv[argi + i];
+            cmd_exec_level(targc + 1, task_argv, lvl);
+            return;
+        }
+
+        kprintf("usage: systemm task <list|info|set|kill|run> ...\n");
+        if (argc < 5 && strcmp(tsub, "set") == 0)
+            kprintf("       systemm task set <pid> <level 0-3>\n");
         return;
     }
 

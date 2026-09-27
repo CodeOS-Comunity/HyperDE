@@ -76,7 +76,7 @@ static void ncvm_probe_thread(void) {
     kprintf("NCVM: start entry=0x%lx rsp=0x%lx\n", entry, rsp);
 
     current_process = 0;
-    proc_create("/bin/ncvm", entry, stack);
+    proc_create("/bin/ncvm", entry, stack, LEVEL_USER);
 
     user_mode_set_return(ncvm_probe_done);
     user_mode_begin();

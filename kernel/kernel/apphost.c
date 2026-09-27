@@ -128,7 +128,7 @@ static void apphost_thread_main(void) {
     kprintf("apphost: starting '%s' entry=0x%lx rsp=0x%lx\n", ah_path, entry, rsp);
 
     current_process = 0;
-    proc_create(ah_path, entry, stack);
+    proc_create(ah_path, entry, stack, LEVEL_USER);
 
     /* If requested, run the app inside the container's namespaces/cgroup so
      * its view of the world matches a normal container exec. */
