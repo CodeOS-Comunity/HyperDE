@@ -322,21 +322,25 @@ int container_start(int id) {
      * any enclosing user session). Fall back to the shared-process path only
      * when called from inside a user syscall.
      *
-     * A process created inside a container is LEVEL_CONTAINER whatever asked
-     * for it.  The callers here are waydroid, the android session and VM
-     * boot, all of which are kernel code with no process_t of their own, so
-     * none of them needs a level assigned -- only the payload does, and a
-     * container payload is the untrusted environment by definition.  Giving
-     * it the caller's level instead would mean a level-2 user could obtain a
-     * level-2 process inside a container and the containment would mean
-     * nothing. */
+     * This is the container *initializer* -- the entrypoint the image boots --
+     * and it is LEVEL_KERNEL, not LEVEL_CONTAINER.  The split matters: the
+     * initializer is the trusted part that establishes the container's
+     * namespaces, cgroup and uid mapping, and it is what launches the
+     * untrusted apps that then run at LEVEL_CONTAINER (see
+     * container_exec).  A level-0 initializer could not launch anything,
+     * because 0 >= 0 holds but 0 >= 3 does not, so the kernel-side session
+     * managers would have no authority over their own containers.
+     *
+     * The initializer is reachable only from kernel code: waydroid, the
+     * android session and VM boot all call container_start(), and none of them
+     * has a process_t, so nothing a user can signal can reach this level. */
     process_t *proc = proc_current();
     int host_mode = (proc != 0);
     uint64_t rsp;
     if (!proc) {
         rsp = elf_setup_stack(stack, entry, 1, init_argv, 0, 0, &auxv);
         if (!rsp) return -1;
-        proc_create(full_path, entry, stack, LEVEL_CONTAINER);
+        proc_create(full_path, entry, stack, LEVEL_KERNEL);
         proc = proc_current();
         if (!proc) return -1;
     } else {
@@ -560,14 +564,26 @@ int container_exec(int id, const char *path, int argc, char **argv, char **envp)
     if (!cur) {
         rsp = elf_setup_stack(stack, entry, argc, argv, envc, envp, &auxv);
         if (!rsp) return -1;
-        /* LEVEL_CONTAINER, as in container_exec_init above: this is the
-         * payload of a container, not a kernel-side service. */
+        /* An *app inside* a running container: LEVEL_CONTAINER, regardless of
+         * who asked.  container_start() creates the initializer at
+         * LEVEL_KERNEL; this is the untrusted payload that runs under it.
+         * Inheriting the caller's level here would let a level-2 user obtain a
+         * level-2 process inside a container, and the containment would mean
+         * nothing. */
         proc_create(full_path, entry, stack, LEVEL_CONTAINER);
         cur = proc_current();
         if (!cur) return -1;
     } else {
         rsp = proc_exec(entry, stack, argc, argv, envp, &auxv);
         if (!rsp) return -1;
+        /* proc_exec() reuses the caller's process_t, so without this the
+         * process would keep whatever level it had and a level-2 user could
+         * ask to run inside a container and stay level-2 -- and then signal
+         * level-2 processes on the *host*, which is not what containment
+         * means.  Entering the container as an app drops it to
+         * LEVEL_CONTAINER, the same level the branch above gives a freshly
+         * created payload.  Both branches therefore agree. */
+        proc_set_level(cur->pid, LEVEL_CONTAINER);
         for (int i = 0; i < PROC_NS_MAX; i++)
             saved_ns[i] = cur->namespaces[i];
         saved_cg = cur->cgroup_id;
