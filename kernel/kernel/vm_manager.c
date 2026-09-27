@@ -433,7 +433,6 @@ int vm_get_memory_usage(int vm_id, uint64_t *rss_bytes) {
     buf[n] = '\0';
 
     /* Parse VmRSS line */
-    const char *rss_marker = "VmRSS:";
     for (int i = 0; i < n - 7; i++) {
         if (buf[i] == 'V' && buf[i+1] == 'm' && buf[i+2] == 'R' &&
             buf[i+3] == 'S' && buf[i+4] == 'S' && buf[i+5] == ':') {
@@ -473,7 +472,6 @@ int vm_get_cpu_usage(int vm_id, uint64_t *cpu_ticks) {
 
     /* Parse utime + stime from /proc/pid/stat
      * Format: pid (comm) state ppid ... utime(14) stime(15) */
-    int fields = 0;
     uint64_t utime = 0, stime = 0;
     const char *p = buf;
     /* Skip past the comm field (may contain spaces) */
