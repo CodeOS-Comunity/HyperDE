@@ -195,7 +195,7 @@ $(RUST_LIB): $(wildcard $(RUST_DIR)/src/*.rs) $(RUST_DIR)/Cargo.toml
 RUST_HD_DIR = kernel/rust_hyperde
 RUST_HD_LIB = $(RUST_HD_DIR)/target/x86_64-unknown-none/release/libhyperde_shell.a
 
-$(RUST_HD_LIB): $(wildcard $(RUST_HD_DIR)/src/*.rs) $(RUST_HD_DIR)/Cargo.toml
+$(RUST_HD_LIB): $(wildcard $(RUST_HD_DIR)/src/*.rs) $(RUST_HD_DIR)/Cargo.toml ../userspace/hyperde/conf.lua
 	cd $(RUST_HD_DIR) && PATH="$(RUST_TOOLCHAIN):$$PATH" cargo build --target x86_64-unknown-none --release
 
 # ── Rust tiling window manager (penrose) ──
