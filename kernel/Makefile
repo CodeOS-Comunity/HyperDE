@@ -319,7 +319,7 @@ arm64:
 # timestamped ISO and kernel silently carrying the old program, which is worse
 # than a build error because nothing looks wrong.  Confirmed by touching
 # pkgs/core/shell/src/shell.c and watching userspace/shell keep its old
-# timestamp through a full `make codeos-1-kernel.iso`.
+# timestamp through a full `make codeos-1.0.iso`.
 #
 # With FORCE the sub-make runs every time, and it is userspace/Makefile that
 # decides whether anything is actually out of date.  ELF mtimes still only
@@ -433,7 +433,7 @@ codeos-1-kernel-grub.iso: $(TARGET)
 ISODIR ?= /tmp/codeos-iso
 LIMINE_DIR ?= .
 
-codeos-1-kernel.iso: $(TARGET)
+codeos-1.0.iso: $(TARGET)
 	rm -rf $(ISODIR)
 	cp -r bootloader/iso_root $(ISODIR)
 	cp $(TARGET) $(ISODIR)/boot/
@@ -489,17 +489,17 @@ arm64-run-display-nogui: $(TARGET)
 		-kernel $(TARGET) -serial file:/tmp/zircon-serial.log \
 		-qmp unix:/tmp/zircon-qmp.sock,server,nowait
 
-run-iso: codeos-1-kernel.iso
+run-iso: codeos-1.0.iso
 	$(QEMU) $(QEMU_BASE) -boot order=d -cdrom $< $(QEMU_NET) $(QEMU_USB) $(QEMU_DISK) $(KVM)
 
-run-vbox: codeos-1-kernel.iso
+run-vbox: codeos-1.0.iso
 	@echo "Running CodeOS in VirtualBox (provisions the 'CodeOS' VM, NAT net, IDE rootfs)..."
 	@$(CURDIR)/../vbox.sh --headless
 
 run-iso-grub: codeos-1-kernel-grub.iso
 	$(QEMU) $(QEMU_BASE) -cdrom $< $(QEMU_NET) $(QEMU_USB) $(QEMU_DISK) $(KVM)
 
-run-iso-nographic: codeos-1-kernel.iso
+run-iso-nographic: codeos-1.0.iso
 	$(QEMU) -machine q35 -m 512M -nographic -cdrom $< $(QEMU_NET) $(QEMU_DISK) $(KVM)
 
 # ─── QEMU with ALL devices (AHCI, full hardware) ───
@@ -513,9 +513,9 @@ run-full: $(TARGET) disk.img
 		$(QEMU_USB) \
 		$(KVM)
 
-run-iso-full: codeos-1-kernel.iso
+run-iso-full: codeos-1.0.iso
 	$(QEMU) -machine q35 -m 512M -serial stdio \
-		-cdrom codeos-1-kernel.iso \
+		-cdrom codeos-1.0.iso \
 		$(QEMU_NET) \
 		$(QEMU_FULL_DISK) \
 		$(QEMU_USB) \
@@ -581,13 +581,13 @@ run-installed: install-image
 	-drive file=$(INSTALL_IMG),format=raw,if=ide \
 	-boot c $(KVM)
 
-virt-install: codeos-1-kernel.iso
+virt-install: codeos-1.0.iso
 	virt-install --connect qemu:///system \
 		--name codeos-1 \
 		--memory 256 \
 		--vcpus 1 \
 		--disk none \
-		--cdrom $(CURDIR)/codeos-1-kernel.iso \
+		--cdrom $(CURDIR)/codeos-1.0.iso \
 		--osinfo detect=on,require=off \
 		--boot menu=on \
 		--graphics vnc,listen=127.0.0.1 \

@@ -25,7 +25,7 @@ Guidance for humans and coding agents working on this tree.
 ## Build
 ```sh
 make -C kernel all
-make -C kernel codeos-1-kernel.iso
+make -C kernel codeos-1.0.iso
 make -C kernel run-iso
 ```
 Host needs `x86_64-elf-gcc`, `xorriso`, `python3`, `cargo`, and QEMU for run targets.
@@ -83,7 +83,7 @@ Host needs `x86_64-elf-gcc`, `xorriso`, `python3`, `cargo`, and QEMU for run tar
 - Apps are userspace ELFs in `pkgs/core/<name>/src/`, built into `/bin/android-*` via `kernel/userspace/Makefile` (`ANDROID_PROGS` + `LIB_ANDROID` = `lib/android_ui.o`) and embedded by `gen_initramfs.py`; the `android-stock` image is populated at boot from those ELFs by `rootfs_seed_android_stock()` (`kernel/kernel/rootfs.c`), and apps are launched inside the container via `container_exec(id, "/system/app/<name>/<name>")`. The app-name list is the single source of truth `rootfs_android_apps` in `rootfs.{c,h}` (shared by rootfs seed + waydroid UI).
 - `appvm`/`container` shell commands work directly on the seeded image: `appvm images` enumerates `/containers/images/`, `appvm pull <debian-minimal|android-stock>` materializes an image, and `appvm run <image> <cmd...>` is docker-style — it activates the fresh container (`container_mark_running`) and execs the command directly (no entrypoint boot), then removes the temporary container on exit; `appvm run <image>` without a cmd boots the entrypoint and keeps the container running.
 - **User-window bridge** (`kernel/kernel/user_wm.{c,h}`): maps WM-protocol messages on fd 3 (commands) / fd 4 (events) to LVGL desktop windows, with fds/events wired in `syscall.c` (READ/PWRITE hooks, `UW_FD_EVT=4`/`UW_FD_CMD=3`) and input/tick routed from the compositor thread in `lvgl_port.c`. `container_exec` calls `user_wm_setup/release` for `/system/app/*` paths; `main.c` arms the bridge via `user_wm_init()` when a framebuffer is present.
-- When the bridge/desktop is absent (headless boot), apps self-report and fall back to console mode — this keeps `make -C kernel codeos-1-kernel.iso` + headless QEMU (`-vga none -nographic`) verification deterministic: `waydroid app launch android-calculator` boots the app and its console REPL evaluates expressions.
+- When the bridge/desktop is absent (headless boot), apps self-report and fall back to console mode — this keeps `make -C kernel codeos-1.0.iso` + headless QEMU (`-vga none -nographic`) verification deterministic: `waydroid app launch android-calculator` boots the app and its console REPL evaluates expressions.
 - Note: kernel `snprintf` has no `-` flag (right-align with the widest width instead) and `fs_resolve()` returns the node index — test with `>= 0`, never `== 0`.
 
 ## OpenWeb (litebrowser-style lightweight browser)

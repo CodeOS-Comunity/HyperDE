@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
-ISO="${SRC}/kernel/codeos-1-kernel.iso"
+ISO="${SRC}/kernel/codeos-1.0.iso"
 DISK="${SRC}/disk.img"
 
 # Source color helpers
@@ -54,7 +54,7 @@ done
 # ISO target explicitly; it depends on the kernel binary and its objects.
 if [ "$SKIP_BUILD" -eq 0 ]; then
     step "Building fresh Limine ISO..."
-    make -j kernel codeos-1-kernel.iso
+    make -j kernel codeos-1.0.iso
 else
     if [ ! -f "$ISO" ]; then
         error "ISO not found: $ISO (run without -s to build it)"

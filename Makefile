@@ -42,17 +42,17 @@ kernel:
 	$(MAKE) -C kernel all
 	@printf "$(GREEN)Kernel built successfully$(RESET)\n"
 
-iso: codeos-1-kernel.iso
+iso: codeos-1.0.iso
 
-codeos-1-kernel.iso:
+codeos-1.0.iso:
 	@printf "$(CYAN)$(BOLD)==> Creating ISO...$(RESET)\n"
-	$(MAKE) -C kernel codeos-1-kernel.iso
-	cp kernel/codeos-1-kernel.iso codeos-1-kernel.iso
-	@printf "$(GREEN)ISO ready: codeos-1-kernel.iso$(RESET)\n"
+	$(MAKE) -C kernel codeos-1.0.iso
+	cp kernel/codeos-1.0.iso codeos-1.0.iso
+	@printf "$(GREEN)ISO ready: codeos-1.0.iso$(RESET)\n"
 
 clean: clean-qt6
 	$(MAKE) -C kernel clean
-	rm -f codeos-1-kernel.bin codeos-1-kernel.iso
+	rm -f codeos-1-kernel.bin codeos-1.0.iso
 	@printf "$(GREEN)Clean complete$(RESET)\n"
 
 run: kernel

@@ -46,7 +46,7 @@ import tty
 HERE = os.path.dirname(os.path.abspath(__file__))
 KERNEL_DIR = os.path.normpath(os.path.join(HERE, ".."))
 REPO = os.path.normpath(os.path.join(KERNEL_DIR, ".."))
-ISO = os.path.join(KERNEL_DIR, "codeos-1-kernel.iso")
+ISO = os.path.join(KERNEL_DIR, "codeos-1.0.iso")
 KERNEL_BIN = os.path.join(KERNEL_DIR, "codeos-1-kernel.bin")
 WORK = "/tmp/codeos-fs-test"
 
@@ -1394,7 +1394,7 @@ def main():
                          "rewrites it and dumpe2fs/e2fsck remain the authority.")
     args = ap.parse_args()
     if not os.path.exists(ISO):
-        log(f"missing {ISO} -- build it with: make -C {KERNEL_DIR} codeos-1-kernel.iso")
+        log(f"missing {ISO} -- build it with: make -C {KERNEL_DIR} codeos-1.0.iso")
         return 2
     if args.journal_csum and args.fstype == "ext2":
         log("ext2 has no journal; --journal-csum would test nothing")

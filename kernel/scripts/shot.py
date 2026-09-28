@@ -23,7 +23,7 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ISO = os.path.join(REPO, "kernel", "codeos-1-kernel.iso")
+ISO = os.path.join(REPO, "kernel", "codeos-1.0.iso")
 SOCK = "/tmp/codeos-shot-qmp.sock"
 LOG = "/tmp/codeos-shot-serial.log"
 PPM = "/tmp/codeos-shot.ppm"
@@ -219,7 +219,7 @@ def launch(qemu):
     """Start QEMU and return (proc, Qmp) with capabilities negotiated."""
     if not os.path.exists(qemu[qemu.index("-cdrom") + 1]):
         raise SystemExit(f"{qemu[qemu.index('-cdrom') + 1]} not built -- "
-                         f"run: make -C kernel codeos-1-kernel.iso")
+                         f"run: make -C kernel codeos-1.0.iso")
     for p in (SOCK, PPM):
         if os.path.exists(p):
             os.unlink(p)
@@ -267,7 +267,7 @@ def main():
     args = ap.parse_args()
 
     if not os.path.exists(ISO):
-        raise SystemExit(f"{ISO} not built -- run: make -C kernel codeos-1-kernel.iso")
+        raise SystemExit(f"{ISO} not built -- run: make -C kernel codeos-1.0.iso")
 
     for p in (args.serial,):
         if os.path.exists(p):

@@ -68,7 +68,7 @@ make -j"$(nproc)"
 echo "CodeOS compiled successfully."
 echo "Boot it with:"
 echo "  ./run.sh                                   # builds ISO + runs QEMU"
-echo "  qemu-system-x86_64 -cdrom kernel/codeos-1-kernel.iso"
+echo "  qemu-system-x86_64 -cdrom kernel/codeos-1.0.iso"
 
 # ── CodeOS packages (individual pkgs from the CodeOS-Comunity org) ─────────
 # Every repo in github.com/CodeOS-Comunity is an installable CodeOS package:

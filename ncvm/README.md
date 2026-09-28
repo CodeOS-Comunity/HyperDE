@@ -95,9 +95,9 @@ user-net with `hostfwd tcp::7070-:80` and `tcp::2222-:22`, KVM when
 under TCG with a `ramfb` display, and `-monitor none` keeps the (qemu)
 monitor off stdio for both archs (override: `ncvm -- -monitor stdio`).
 
-The ISO is located automatically (env `NCVM_ISO`, `./codeos-1-kernel.iso`,
+The ISO is located automatically (env `NCVM_ISO`, `./codeos-1.0.iso`,
 `../CodeOS/kernel/`, `~/CodeOS/kernel/`, `~/Projects/CodeOS/kernel/`); build
-it in the CodeOS tree with `make -C kernel codeos-1-kernel.iso`.
+it in the CodeOS tree with `make -C kernel codeos-1.0.iso`.
 
 - Reuse an existing QEMU checkout: `NCVM_QEMU_SRC=/path/to/qemu bash build-codeos.sh`
 - System install: `bash build-codeos.sh install` (binaries + `ncvm` runner →

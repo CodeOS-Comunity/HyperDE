@@ -45,7 +45,7 @@ kernel/userspace/android-camera
 kernel/userspace/android-calendar
 kernel/userspace/android-keyboard
 codeos-1-kernel.bin
-codeos-1-kernel.iso
+codeos-1.0.iso
 
 # Build directories
 Zircon/build/

@@ -90,12 +90,12 @@ fi
 # build artifacts are found without cwd games.
 find_iso() {
     local cand
-    for cand in "${NCVM_ISO:-}" "$PWD/codeos-1-kernel.iso" \
-                "$PWD/../CodeOS/kernel/codeos-1-kernel.iso" \
-                "$HOME/CodeOS/kernel/codeos-1-kernel.iso" \
-                "$HOME/Projects/CodeOS/kernel/codeos-1-kernel.iso" \
-                "$SELF_DIR/../kernel/codeos-1-kernel.iso" \
-                "$SELF_DIR/../../kernel/codeos-1-kernel.iso"; do
+    for cand in "${NCVM_ISO:-}" "$PWD/codeos-1.0.iso" \
+                "$PWD/../CodeOS/kernel/codeos-1.0.iso" \
+                "$HOME/CodeOS/kernel/codeos-1.0.iso" \
+                "$HOME/Projects/CodeOS/kernel/codeos-1.0.iso" \
+                "$SELF_DIR/../kernel/codeos-1.0.iso" \
+                "$SELF_DIR/../../kernel/codeos-1.0.iso"; do
         [ -n "$cand" ] && [ -f "$cand" ] && { echo "$cand"; return 0; }
     done
     return 1
