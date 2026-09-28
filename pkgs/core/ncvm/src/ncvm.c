@@ -733,6 +733,14 @@ static int selftest_main(void) {
         };
         const int want = (int)(sizeof(planted) / sizeof(planted[0]));
 
+        /* Arrange the precondition.  CMD_DIR is created by vm_create() on
+         * first use, so at boot -- when this runs -- it does not exist yet,
+         * and sys_readdir on it returns -1.  A self-test that assumed it was
+         * already there would report a failure that says nothing about the
+         * contract it is trying to check. */
+        sys_mkdir("/tmp");
+        sys_mkdir(CMD_DIR);
+
         for (i = 0; i < want; i++)
             if (!st_touch(CMD_DIR, planted[i])) break;
         st_pass(i == want, "the selftest scratch files were created");
@@ -745,7 +753,7 @@ static int selftest_main(void) {
          * and then read padding as if it were data; a count-returning one
          * would stop at the entry count and never see the rest. */
         found = 0;
-        for (off = 0; off > 0 && off < n; ) {
+        for (off = 0; off < n; ) {
             for (i = 0; i < want; i++)
                 if (strcmp(names + off, planted[i]) == 0) { found++; break; }
             off += (int)strlen(names + off) + 1;

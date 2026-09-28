@@ -14,11 +14,11 @@
  * that quietly created files would have hidden the bug in
  * ncvm.c:write_file().
  *
- * The one thing this file does NOT model is the kernel's readdir
- * record layout -- see sys_readdir below, which implements the
- * NUL-packed, byte-count contract that ncvm.c already assumes and that
- * kernel/kernel/syscall.c:sys_readdir() does not yet honour.  The kernel
- * side is verified by booting, not by this harness.
+ * The one thing this file does NOT model is the kernel's readdir record
+ * layout -- see sys_readdir below.  It implements the NUL-packed,
+ * byte-count contract, which is what ncvm.c and crosvm-launcher.c already
+ * assumed; the kernel side of that contract is verified by booting
+ * (`ncvm --selftest` plants 8 names and requires all 8 back), not here.
  */
 #ifndef CODEOS_SHIM_H
 #define CODEOS_SHIM_H
@@ -119,6 +119,15 @@ static inline int sys_close(int fd) { return close(fd); }
 static inline int sys_unlink(const char *path) { return unlink(path); }
 static inline int sys_getpid(void) { return (int)getpid(); }
 static inline int sys_set_personality(int p) { (void)p; return 0; }
+
+/* CodeOS sys_mkdir has no mode argument and, like POSIX mkdir, fails if the
+ * directory already exists -- syscall.c:sys_mkdir returns -1 whenever
+ * fs_mkdir() does.  Deliberately not softened to "EEXIST is success": the
+ * point of this shim is the contract, and a caller that mishandles the
+ * failure has to fail here too. */
+static inline int sys_mkdir(const char *path) {
+    return mkdir(path, 0755) == 0 ? 0 : -1;
+}
 
 static inline void sys_exit(int status) { _exit(status); }
 
