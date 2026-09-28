@@ -299,9 +299,10 @@ int main(int argc, char **argv) {
     for (;;) {
         /* Poll the command directory */
         char names[MAX_POLL];
+        /* sys_readdir fills the buffer with NUL-separated entry names and
+         * returns the byte count, so `n` bounds the walk below. */
         int n = sys_readdir(CMD_DIR, names, sizeof(names));
         if (n > 0) {
-            /* sys_readdir returns NUL-separated entries; walk them */
             int off = 0;
             while (off < n) {
                 const char *entry = names + off;

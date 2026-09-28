@@ -1816,21 +1816,45 @@ static int64_t sys_rename(const char *user_old, const char *user_new) {
     return 0;
 }
 
-static int64_t sys_readdir(const char *user_path, char *user_names, int max_entries) {
-    if (max_entries <= 0) return -1;
+/* Directory listing for userspace.
+ *
+ * Contract, which every caller in the tree already assumes:
+ *   - the buffer is filled with NUL-separated entry names, packed
+ *     (no fixed-stride padding between entries);
+ *   - max_bytes is the *byte* capacity of the caller's buffer;
+ *   - the return value is the number of bytes written, i.e. the caller's
+ *     loop bound, or <= 0 on error.
+ *
+ * This used to copy a fixed-stride names[count][FS_NAME_MAX] array and
+ * return the *entry count*, which is a different contract: callers treated
+ * the count as a byte length, so a directory of 10 files reported 10 and
+ * they scanned 10 bytes of a 320-byte buffer -- the last entry was cut off
+ * mid-name and the padding between entries was walked as if it were data.
+ * ncvm.c and crosvm-launcher.c both did this, and both were reading
+ * uninitialised stack past each NUL. */
+static int64_t sys_readdir(const char *user_path, char *user_names, int max_bytes) {
+    if (max_bytes <= 0) return -1;
     char path[FS_PATH_MAX];
     if (copy_from_user(path, (uint64_t)user_path, FS_PATH_MAX - 1) < 0)
         return -1;
     path[FS_PATH_MAX - 1] = 0;
 
-    char names[128][FS_NAME_MAX];
-    int count = fs_listdir(path, names, 128);
-    if (count < 0) return -1;
-
-    int total = count * FS_NAME_MAX;
-    if (copy_to_user((uint64_t)user_names, names, total > max_entries * FS_NAME_MAX ? max_entries * FS_NAME_MAX : total) < 0)
+    /* Fill a kernel buffer via fs_dir_list(), so this and vmd_dir_scan() are
+     * one implementation of the contract rather than two that can drift, then
+     * copy out -- a user pointer must not be written directly.
+     *
+     * 4096 is the capacity every caller in the tree passes (MAX_POLL in
+     * ncvm.c and crosvm-launcher.c, and shell.c's ls), and the previous
+     * fs_listdir(…, 128) capped the listing at 128 *entries* regardless of
+     * buffer size, so nothing regresses.  A directory larger than this is
+     * truncated to a whole number of names; no caller paginates today. */
+    char buf[4096];
+    int total = fs_dir_list(path, buf, (int)sizeof(buf));
+    if (total < 0) return -1;
+    if (total > max_bytes) total = max_bytes;
+    if (total > 0 && copy_to_user((uint64_t)user_names, buf, (size_t)total) < 0)
         return -1;
-    return count;
+    return total;
 }
 
 static int64_t sys_chmod(const char *user_path, int mode) {

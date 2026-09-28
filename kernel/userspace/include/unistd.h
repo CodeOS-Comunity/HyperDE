@@ -471,9 +471,12 @@ static inline int sys_rename(const char *oldpath, const char *newpath) {
     return ret;
 }
 
-static inline int sys_readdir(const char *path, char *names, int max_entries) {
+/* Fills `names` with NUL-separated entry names and returns the number of
+ * bytes written, or <= 0.  `max_bytes` is the buffer capacity in bytes, not
+ * an entry count. */
+static inline int sys_readdir(const char *path, char *names, int max_bytes) {
     int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(SYSCALL_READDIR), "D"(path), "S"(names), "d"(max_entries) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(SYSCALL_READDIR), "D"(path), "S"(names), "d"(max_bytes) : "memory");
     return ret;
 }
 
