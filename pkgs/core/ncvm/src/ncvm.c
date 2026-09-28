@@ -112,10 +112,14 @@ static int read_file(const char *path, char *buf, int max) {
 }
 
 static int write_file(const char *path, const char *data) {
-    int fd = sys_open(path, 1);
-    if (fd < 0) fd = sys_open(path, 2);
+    /* O_CREAT matters: .pid/.exit/.sup are the backend's own output, so
+     * nothing else has created them.  The previous `sys_open(path, 1)`
+     * would fail with -ENOENT for exactly those. */
+    int fd = sys_open(path, O_WRONLY | O_CREAT);
     if (fd < 0) return -1;
-    int n = sys_write(data, strlen(data));
+    /* pwrite, not write: sys_write() takes no fd and goes to stdout, which
+     * sent every feedback file to the console instead of to disk. */
+    int n = sys_pwrite(fd, data, strlen(data));
     sys_close(fd);
     return n;
 }

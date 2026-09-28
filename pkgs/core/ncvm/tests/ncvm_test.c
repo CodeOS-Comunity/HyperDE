@@ -81,11 +81,51 @@ static void test_read_file(void) {
     ok(slurp(path, back, sizeof(back)) == 5 && !strcmp(back, "hello"),
        "the bytes are really on disk, not just in read_file's view");
 
-    ok(read_file(path, body, 2) == 1 && body[0] == 'h',
-       "read_file honours a short buffer and still NUL-terminates");
+    /* max is the usable content length, not the buffer size: every caller
+     * passes sizeof(buf) - 1 so that buf[max] is a valid NUL slot. */
+    ok(read_file(path, body, 2) == 2 && !strcmp(body, "he"),
+       "read_file truncates to max and still NUL-terminates");
 
     snprintf(path, sizeof(path), "%s/nope", CMD_DIR);
     ok(read_file(path, back, sizeof(back)) < 0, "read_file reports a missing file");
+}
+
+/* ── write_file: the .pid/.exit/.sup feedback protocol ─────────────────
+ * These are the files the kernel's vm manager waits on. Nothing else
+ * creates them, so write_file has to create them itself, and has to put
+ * the bytes in the file rather than on the console.
+ */
+static void test_write_file(void) {
+    char path[256], cmd[256], back[128];
+    section("write_file");
+
+    /* Creates a file that does not exist yet. */
+    snprintf(path, sizeof(path), "%s/wf-new.pid", CMD_DIR);
+    ok(write_file(path, "4242\n") > 0, "write_file creates a missing file");
+    ok(file_exists(path), "the new file exists on disk");
+    ok(slurp(path, back, sizeof(back)) == 5 && !strcmp(back, "4242\n"),
+       "the content is in the file, not on the console");
+
+    /* The console must not have received it. This is the specific way the
+     * old sys_write() bug showed up: a caller could report success while
+     * printing the payload and writing nothing. */
+    console_reset();
+    snprintf(path, sizeof(path), "%s/wf-console.pid", CMD_DIR);
+    write_file(path, "7\n");
+    ok(!console_has("7\n"), "write_file does not leak content to the console");
+
+    /* Overwrites an existing file, as a re-used VM name does. */
+    snprintf(path, sizeof(path), "%s/wf-old.exit", CMD_DIR);
+    write_file(path, "1\n");
+    ok(write_file(path, "256\n") > 0, "write_file overwrites an existing file");
+    ok(slurp(path, back, sizeof(back)) == 4 && !strcmp(back, "256\n"),
+       "the overwrite replaced the old content");
+
+    /* The full round trip the daemon depends on. */
+    snprintf(cmd, sizeof(cmd), "%s/wf-rt.sup", CMD_DIR);
+    ok(write_file(cmd, "1\n") > 0, "write_file writes a .sup file");
+    ok(read_file(cmd, back, sizeof(back)) == 2 && !strcmp(back, "1\n"),
+       "read_file reads back what write_file wrote");
 }
 
 /* ── valid_name: the only thing standing between a VM name and a path ── */
@@ -275,6 +315,7 @@ int main(void) {
     test_is_digits();
     test_tokenize();
     test_read_file();
+    test_write_file();
     test_translate_basics();
     test_translate_drops_crosvm_only();
     test_translate_accel_and_machine();
