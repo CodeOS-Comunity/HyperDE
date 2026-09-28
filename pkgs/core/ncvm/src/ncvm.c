@@ -672,30 +672,107 @@ static int cli_vm(int argc, char **argv) {
     return 1;
 }
 
-/* ── self-test (boot-time smoke test for the VM backend binary) ───────── */
+/* ── self-test (boot-time smoke test for the VM backend binary) ─────────
+ *
+ * Every check below is an assertion that can fail.  This used to print "OK"
+ * and `return 0` unconditionally, so `ncvm --selftest` was green by
+ * construction: ncvm_probe.c reported "NCVM: done status=0" whether or not
+ * any of it worked, and a syscall returning -ENOSYS could not turn the boot
+ * log red.  The summary line format is grepped by the boot harness, so it is
+ * part of the contract -- see kernel/AGENTS.md.
+ */
+static int st_checks;
+static int st_failed;
+static char st_first_fail[128];
+
+static void st_pass(int cond, const char *what) {
+    st_checks++;
+    if (cond) {
+        printf("ncvm: selftest [ok  ] %s\n", what);
+        return;
+    }
+    st_failed++;
+    if (!st_first_fail[0])
+        snprintf(st_first_fail, sizeof(st_first_fail), "%s", what);
+    printf("ncvm: selftest [FAIL] %s\n", what);
+}
+
+/* Create <dir>/<name> with a byte of content, so a later readdir has a
+ * non-empty directory to enumerate.  write_file() is the same path the
+ * daemon uses for its .pid/.exit files, so this also re-exercises it. */
+static int st_touch(const char *dir, const char *name) {
+    char path[128];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    return write_file(path, "x") > 0;
+}
+
 static int selftest_main(void) {
+    char names[MAX_POLL];
+    int n;
+    int off, entries, i, found;
     printf("ncvm: selftest start (pid %d)\n", sys_getpid());
 
-    /* Exercise the backend's working set: dir listing + name validation. */
-    char names[MAX_POLL];
-    int n = sys_readdir(CMD_DIR, names, sizeof(names));
-    if (n > 0) {
-        int off = 0, entries = 0;
-        while (off < n) {
-            while (off < n && names[off]) off++;
-            off++;
-            entries++;
+    st_pass(valid_name("selftest.vm") && !valid_name("../evil") &&
+            !valid_name("a/b") && !valid_name(""),
+           "name validation accepts a plain name and rejects traversal");
+    st_pass(is_digits("4096") && !is_digits("-1") && !is_digits("4a"),
+           "argument validation accepts digits only");
+
+    /* sys_readdir contract: NUL-separated names, packed, byte count.
+     *
+     * CMD_DIR is normally empty at boot, so it cannot tell a correct
+     * implementation from one that lists nothing.  Populate it with a known
+     * number of files and require all of them back, by name.  This is the
+     * only end-to-end check of the kernel side of the contract: the daemon
+     * that also walks it is not started at boot.
+     */
+    {
+        static const char *planted[] = {
+            "st_a.cmd", "st_b.cmd", "st_c.ctl", "st_d.pid",
+            "st_e.exit", "st_f.sup", "st_g", "st_h",
+        };
+        const int want = (int)(sizeof(planted) / sizeof(planted[0]));
+
+        for (i = 0; i < want; i++)
+            if (!st_touch(CMD_DIR, planted[i])) break;
+        st_pass(i == want, "the selftest scratch files were created");
+
+        n = sys_readdir(CMD_DIR, names, sizeof(names));
+        st_pass(n > 0, "sys_readdir reports a byte count for a populated directory");
+
+        /* Every planted name must be present, intact.  A fixed-stride
+         * implementation walked with a byte bound would find the first few
+         * and then read padding as if it were data; a count-returning one
+         * would stop at the entry count and never see the rest. */
+        found = 0;
+        for (off = 0; off > 0 && off < n; ) {
+            for (i = 0; i < want; i++)
+                if (strcmp(names + off, planted[i]) == 0) { found++; break; }
+            off += (int)strlen(names + off) + 1;
         }
-        printf("ncvm: selftest %s has %d entries\n", CMD_DIR, entries);
-    } else {
-        printf("ncvm: selftest %s empty/unmounted\n", CMD_DIR);
+        printf("ncvm: selftest readdir %d of %d planted names in %d bytes\n",
+               found, want, n);
+        st_pass(found == want, "sys_readdir returns every name whole, not just the first few");
+
+        /* And the count must be the byte length, not the entry count: walking
+         * exactly n bytes must land on the end without reading past it. */
+        entries = 0;
+        for (off = 0; off < n; off++) if (names[off] == 0) entries++;
+        st_pass(entries > 0 && entries < n,
+               "the listing is packed NUL-separated names, not fixed-stride records");
+
+        for (i = 0; i < want; i++) {
+            char path[128];
+            snprintf(path, sizeof(path), "%s/%s", CMD_DIR, planted[i]);
+            sys_unlink(path);
+        }
     }
 
-    if (valid_name("selftest.vm") && !valid_name("../evil"))
-        printf("ncvm: selftest name-validation ok\n");
-    if (is_digits("4096") && !is_digits("-1"))
-        printf("ncvm: selftest arg-validation ok\n");
-
+    printf("ncvm: selftest checks=%d failed=%d\n", st_checks, st_failed);
+    if (st_failed) {
+        printf("ncvm: selftest FAIL (first: %s)\n", st_first_fail);
+        return 1;
+    }
     printf("ncvm: selftest OK\n");
     return 0;
 }

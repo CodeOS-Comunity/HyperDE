@@ -89,7 +89,11 @@ static void ncvm_probe_thread(void) {
 static volatile int ncvm_probe_done_flag;
 
 static void ncvm_probe_done(void) {
-    kprintf("NCVM: done status=%d\n", user_mode_last_exit_status());
+    int status = user_mode_last_exit_status();
+    /* A non-zero status means the selftest's own assertions failed, so name
+     * it rather than letting "done status=1" read like an ordinary exit. */
+    kprintf(status == 0 ? "NCVM: done status=0\n"
+                        : "NCVM: FAIL selftest exited %d\n", status);
     current_process = 0;
     proc_reap();
     ncvm_probe_done_flag = 1;
