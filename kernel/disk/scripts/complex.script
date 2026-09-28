@@ -1,10 +1,3 @@
-// Runs on every boot where a 0x83 partition mounts, from main.c PHASE 7:
-//     codefs_mount(i) ... else if (ext2_mount(i))
-//         script_run_file("/scripts/test1.script");
-//         script_run_file("/scripts/complex.script");
-// These two paths are hardcoded there, so the pre-baked disk.img has to ship
-// them or the mount succeeds and then silently finds nothing to run.
-
 print "CodeOS Scripting Engine Test"
 
 let counter = 0
@@ -12,3 +5,15 @@ while counter < 5 {
     print "Count: " + counter
     let counter = counter + 1
 }
+
+function square(n) {
+    return n * n
+}
+
+let total = 0
+let i = 1
+while i <= 5 {
+    total = total + square(i)
+    let i = i + 1
+}
+print "Sum of squares 1..5 = " + total
