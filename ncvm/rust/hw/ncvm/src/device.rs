@@ -49,7 +49,7 @@ const NCVM_FEAT_RUST_HANDLER: u8 = 1 << 0;
 const NCVM_FEAT_LEGACY_PRUNED: u8 = 1 << 1;
 
 /// QEMU version exposed by the device, BCD-encoded (10.2.x).
-const NCVM_QEMU_BCD: u32 = 0x000a_0200;
+const NCVM_QEMU_BCD: u32 = 0x000a0204;
 /// ncvm device model revision.
 const NCVM_DEV_REV: u32 = 1;
 
@@ -170,9 +170,9 @@ impl NCVMState {
             0x03 => b'M',
             // features
             0x04 => NCVM_FEAT_RUST_HANDLER | NCVM_FEAT_LEGACY_PRUNED,
-            // service major/minor (QEMU 10.2)
-            0x05 => 0x0a,
-            0x06 => 0x02,
+            // service major/minor (QEMU 10.2.4 BCD)
+            0x05 => (NCVM_QEMU_BCD >> 24 & 0xff) as u8,
+            0x06 => (NCVM_QEMU_BCD >> 16 & 0xff) as u8,
             // guest command echo (port window)
             0x07 => self.regs.borrow().cmd as u8,
             // QEMU version, BCD u32 @ 0x08

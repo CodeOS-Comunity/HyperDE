@@ -20,7 +20,10 @@
 extern uint64_t syscall_kernel_rsp;
 
 /* ncvm portal device ports (Rust memory handlers), see include/hw/ncvm/ncvm.h.
- * 0x740..0x747 is free I/O space on q35 (0x630 is acpi-smi there). */
+ * 0x740..0x747 is free I/O space on q35 (0x630 is acpi-smi there). Read-only
+ * identity/status window (I/O ports 0x740..0x747, i.e. 8 ports) plus the
+ * guest-command byte register at 0x747 (write sets, read echoes).
+ */
 #define NCVM_IOBASE 0x740u
 
 static void ncvm_probe_done(void);
