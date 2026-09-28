@@ -281,7 +281,7 @@ void QtAppWindow::paintEvent(QPaintEvent *) {
 
     /* ── Window controls — LEFT side of the band, macOS order ──
      * close, minimize, zoom, left to right.  Mirrors draw_window_chrome()
-     * in rust_hyperde exactly: same inset, same 20px pitch, same 12px dots,
+     * in hyperde exactly: same inset, same 20px pitch, same 12px dots,
      * same grey-when-unfocused, so the lvgl/Qt and X11 window families are
      * pixel-identical rather than merely similar.
      *

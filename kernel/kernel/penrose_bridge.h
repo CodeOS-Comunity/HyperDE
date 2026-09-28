@@ -61,8 +61,8 @@ int prs_painting(void);
  * Qt routes bar-pill clicks, chrome clicks and keyboard shortcuts through
  * the same API. */
 
-#define PRS_CHROME_SH 6  /* shadow inset, mirrors rust_hyperde WIN_SH */
-#define PRS_CHROME_TB 30 /* title-band height, mirrors rust_hyperde WIN_TB */
+#define PRS_CHROME_SH 6  /* shadow inset, mirrors hyperde WIN_SH */
+#define PRS_CHROME_TB 30 /* title-band height, mirrors hyperde WIN_TB */
 #define PRS_WIN_MAX   32
 
 typedef struct {

@@ -2,7 +2,7 @@
 """Assert HyperDE's window chrome is in the macOS arrangement, from real pixels.
 
 The chrome is drawn straight into the framebuffer by
-`draw_window_chrome()` in rust_hyperde, so there is nothing to screenshot on
+`draw_window_chrome()` in hyperde, so there is nothing to screenshot on
 the host and nothing to introspect at runtime -- the only honest oracle is the
 framebuffer itself. This boots the ISO, clicks the launcher so windows actually
 get composited, captures the frame, and measures where the traffic lights are.
@@ -27,7 +27,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from shot_probe import at, load                                    # noqa: E402
 
-# Geometry the painter must produce, in rust_hyperde's own constants.
+# Geometry the painter must produce, in hyperde's own constants.
 WIN_SH = 6            # shadow inset
 WIN_TB = 30           # title band height
 DOT_D = 12            # traffic-light diameter
