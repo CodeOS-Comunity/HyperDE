@@ -78,13 +78,32 @@ Host needs `x86_64-elf-gcc`, `xorriso`, `python3`, `cargo`, and QEMU for run tar
 7. Drop stale duplicates under `kernel/kernel/` once panels are sole source of truth
 
 ## VM / app-compat stack (done)
-- ncvm: the in-guest VM backend at `pkgs/core/ncvm/src/ncvm.c` (kernel-syscall only, same wire protocol as crosvm-launcher). `/bin/ncvm` daemon polls `/tmp/crosvm-cmds/`, translates crosvm-style command lines to ncvm/QEMU args and execs the ncvm VMM (default `/usr/bin/ncvm-x86_64`, env `NCVM_BIN`; not rootfs-embedded — provide beside the guest on disk.img/9p). `ncvm list|info|start|stop|pause|resume` drives VMs via the same files; `ncvm --selftest` is a boot-time smoke test. Wired into userspace `CORE_PROGS`/`PROGRAMS` + kernel `USER_PROGS`. A boot-time self-test (`kernel/kernel/ncvm_probe.c`, launched from `main.c` like `compat_probe`) loads and runs `/bin/ncvm --selftest` and prints `NCVM: done status=0`.
+- ncvm: the in-guest VM backend at `pkgs/core/ncvm/src/ncvm.c` (kernel-syscall only, same wire protocol as crosvm-launcher). `/bin/ncvm` daemon polls `/tmp/crosvm-cmds/`, translates crosvm-style command lines to ncvm/QEMU args and execs the ncvm VMM (default `/usr/bin/ncvm-x86_64`, env `NCVM_BIN`; not rootfs-embedded — provide beside the guest on disk.img/9p). `ncvm list|info|start|stop|pause|resume` drives VMs via the same files; `ncvm --selftest` is a boot-time smoke test. Wired into userspace `CORE_PROGS`/`PROGRAMS` + kernel `USER_PROGS`. A boot-time self-test (`kernel/kernel/ncvm_probe.c`, launched from `main.c` like `compat_probe`) loads and runs `/bin/ncvm --selftest` and prints `NCVM: done status=0` on success, or `NCVM: FAIL selftest exited N` on assertion failure.
 - ncvm (host side): `ncvm/` at the CodeOS root is CodeOS's own QEMU 10.2.4 fork — builds `ncvm/bin/ncvm-x86_64`, `ncvm/bin/ncvm-aarch64`, `ncvm/bin/ncvm` runner (`make ncvm`; runtime preset: q35, std VGA + EDID, EHCI + tablet/kbd, e1000 hostfwd 7070→80/2222→22, KVM or TCG, ramfb display + auto arm64 kernel for `-a`).
 - crosvm: launcher at `pkgs/core/crosvm-launcher/src/` (kernel-syscall only: SHM, FORK/EXECVE/WAIT, READDIR over `/tmp/crosvm-cmds/{name}.cmd|.ctl|.pid`). Wired into userspace `CORE_PROGS` + kernel `USER_PROGS`.
 - VM control: `SYSCALL_VM` (52) + `VM_CMD_*` in `kernel/kernel/syscall.c`; `vm_manager_init()` called from `main.c`. Shell commands: `vm list|info|start|stop|pause|resume|run`.
 - Linux compat: `linux_syscall_handler` routed via personality; added KILL(62), TGKILL(234), GETPPID(64), GETEUID/GETEGID(107/108), SETUID/SETGID(105/106), SIGALTSTACK(131), CLONE(56), READLINKAT(267), NEWFSTATAT(262). `linux-runner` sets PERSONALITY_LINUX then execve.
 - Process signals: `proc_kill()` (SIGTERM/SIGKILL→zombie+wake parent, SIGSTOP/SIGCONT), `SYSCALL_KILL` (51).
 - Android: `android-apps` program (list/containers/launch) in `pkgs/core/android-apps/src/`; container exec syscall fixed (argv now via a4=r10); `android-container` exposes props/binder/ashmem.
+
+## ncvm: host test harness (`pkgs/core/ncvm/tests/`)
+- `make ncvm-check` (also wired into `make check`) builds a host test binary by compiling the **real** `ncvm.c` with `main` renamed (`#define main ncvm_main`), including it from `ncvm_test.c`, and shadowing `kernel/userspace/include/unistd.h` with `codeos_shim.h` which maps every syscall onto POSIX.
+- The shim models the **contract, not convenience**: CodeOS open flags are the Linux values (O_WRONLY=1, O_RDWR=2, O_CREAT=0x40, O_TRUNC=0x200), so they pass straight to POSIX `open()` — a missing `O_CREAT` fails in the harness exactly as in the guest. This is how the `write_file` bug (discarding the fd, calling stdout-only `sys_write`) was visible in the host tests.
+- `sys_readdir` contract in the shim matches what both callers already assumed (NUL-packed names, byte count returned). Only two consumers exist: `ncvm.c` (3 sites) and `crosvm-launcher.c` (1 site).
+- Lifecycle tests fork real children: one traps signals (the VMM stand-in), one deliberately does not (the supervisor stand-in). Signalling the wrong one is visible as a missing marker line and a dead supervisor. pause/resume are asserted through `/proc/<pid>/stat` ('T' vs 'S'), because SIGSTOP cannot be caught and a non-traced child produces no "continued" wait report on Linux.
+- **Negative controls are mandatory.** The lifecycle tests were validated by reverting only the signal target to the supervisor pid and confirming 4 of 113 checks fail. The readdir test planted its sentinel *outside* `CMD_DIR` (`CMD_DIR/../victim.cmd`), so a traversal bug would reach it — not inside where `..` cannot escape.
+- Run: `make ncvm-check` (also part of `make check`).
+
+## ncvm: sys_readdir contract (kernel + userspace)
+- **Contract**: the buffer is filled with NUL-separated entry names, packed (no fixed-stride padding). `max_bytes` is the byte capacity of the caller's buffer. The return value is the number of bytes written (i.e. the caller's loop bound), or <= 0 on error.
+- Previously `sys_readdir` copied a fixed-stride `names[count][FS_NAME_MAX]` array and returned the *entry count*. Every caller treated that count as a byte length, so a directory of 10 files reported 10 and the caller walked 10 bytes of a 320-byte buffer — only the first ~4 entries were seen and the padding was uninitialised stack. `crosvm-launcher.c:300` even had a comment asserting the opposite of the truth.
+- Fixed by delegating to `fs_dir_list()` (the single canonical lister already used by `vm_manager.c`), which writes packed NUL-separated names. `kernel/userspace/include/unistd.h` updated with a doc comment stating the contract. Both live consumers (`ncvm.c` and `crosvm-launcher.c`) already walked the buffer the packed way; the kernel now honours it.
+- End-to-end verification: `ncvm --selftest` plants 8 known names in `CMD_DIR`, requires all 8 back intact, asserts the byte count equals the packed length, and confirms the walk lands on the end without reading past it. Boot evidence:
+```
+ncvm: selftest readdir 8 of 8 planted names in 65 bytes
+ncvm: selftest [ok  ] sys_readdir returns every name whole, not just the first few
+ncvm: selftest [ok  ] the listing is packed NUL-separated names, not fixed-stride records
+```
 
 ## Task security levels (systemm is the authority)
 - Every task carries a level, ordered by privilege. **A task may act on anything at or below its own level, never above** — the ordering *is* the permission model, there is no separate ACL:
