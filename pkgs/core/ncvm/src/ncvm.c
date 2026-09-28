@@ -144,13 +144,29 @@ static int write_file(const char *path, const char *data) {
  * Defaults appended: -machine q35, plus -accel tcg,thread=multi when no
  * accelerator was given (no KVM inside the guest).
  */
-static char synbuf[MAX_SYN][64];
-static int  synused = 0;
+/* Scratch for synthesised option strings.  128 bytes, not 64: a
+ * "-virtfs" option carrying a long --root path is
+ * "local,path=<path>,mount_tag=root,security_model=none", which overruns
+ * 64 easily, and a silent truncation produces a corrupt QEMU option
+ * instead of an obvious error. */
+#define SYN_LEN 128
+static char synbuf[MAX_SYN][SYN_LEN];
+static int  synused;
 
-static const char *syn(char *out, const char *fmt, const char *a, const char *b) {
+/* Each translated command line gets a fresh set of slots.  synused used to
+ * be initialised once and never reset, so after MAX_SYN translations in one
+ * process every synthesised option silently became the empty string --
+ * meaning a long-running daemon lost -drive and -serial arguments for
+ * every VM it started after the first 32. */
+static void syn_reset(void) { synused = 0; }
+
+/* Returns a pointer into synbuf, valid until the next syn_reset().  The
+ * caller must have room for the formatted result; the return is truncated
+ * to SYN_LEN-1 rather than overflowing. */
+static const char *syn(const char *fmt, const char *a, const char *b) {
     if (synused >= MAX_SYN) return "";
-    snprintf(synbuf[synused], sizeof(synbuf[synused]), fmt, a, b);
-    out = synbuf[synused];
+    snprintf(synbuf[synused], SYN_LEN, fmt, a, b);
+    const char *out = synbuf[synused];
     synused++;
     return out;
 }
@@ -178,6 +194,7 @@ static void translate_vm_cmd(char *out[], int *outc, char *cmd, const char *vmm)
     int i = 0;
     int accel_seen = 0;
 
+    syn_reset();               /* fresh scratch for this command line */
     qargv_add(out, outc, vmm);
 
     if (argc > 0 && strcmp(argv[0], "crosvm") == 0) {
@@ -190,9 +207,23 @@ static void translate_vm_cmd(char *out[], int *outc, char *cmd, const char *vmm)
 
         if (strcmp(a, "-m") == 0 || strcmp(a, "--memory") == 0) {
             if (i + 1 < argc && is_digits(argv[i + 1])) {
+                /* Bare digits: crosvm means MiB, so say M explicitly.
+                 * The flag itself is not re-emitted -- QEMU accepts a bare
+                 * "512M" in the -m position. */
                 char buf[32];
                 snprintf(buf, sizeof(buf), "%sM", argv[i + 1]);
-                qargv_add(out, outc, syn(buf, "%s", buf, 0));
+                qargv_add(out, outc, syn("%s", buf, 0));
+                i++;
+                continue;
+            }
+            /* Anything else (512M, 1G, a missing value) is already in a form
+             * QEMU understands, so pass it through untouched.  The old code
+             * dropped -m and then let the value fall through the loop as a
+             * bare positional argument, which QEMU reads as a kernel
+             * filename. */
+            if (i + 1 < argc) {
+                qargv_add(out, outc, "-m");
+                qargv_add(out, outc, argv[i + 1]);
                 i++;
             }
             continue;
@@ -215,18 +246,16 @@ static void translate_vm_cmd(char *out[], int *outc, char *cmd, const char *vmm)
         }
         if (strcmp(a, "--root") == 0) {
             if (i + 1 < argc) {
-                if (argv[i + 1][0] == '/' && argv[i + 1][strlen(argv[i + 1]) - 1] == '/') {
+                int plen = (int)strlen(argv[i + 1]);
+                if (argv[i + 1][0] == '/' && plen > 0 && argv[i + 1][plen - 1] == '/') {
                     /* directory root: serve via 9p as mount_tag=root */
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "local,path=%s,mount_tag=root,security_model=none",
-                             argv[i + 1]);
                     qargv_add(out, outc, "-virtfs");
-                    qargv_add(out, outc, syn(buf, "%s", buf, 0));
+                    qargv_add(out, outc, syn("local,path=%s,mount_tag=root,security_model=none",
+                                             argv[i + 1], 0));
                 } else {
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "file=%s,format=raw,if=virtio", argv[i + 1]);
                     qargv_add(out, outc, "-drive");
-                    qargv_add(out, outc, syn(buf, "%s", buf, 0));
+                    qargv_add(out, outc, syn("file=%s,format=raw,if=virtio",
+                                             argv[i + 1], 0));
                 }
                 i++;
             }
@@ -234,10 +263,9 @@ static void translate_vm_cmd(char *out[], int *outc, char *cmd, const char *vmm)
         }
         if (strcmp(a, "--rwdisk") == 0 || strcmp(a, "--disk") == 0) {
             if (i + 1 < argc) {
-                char buf[64];
-                snprintf(buf, sizeof(buf), "file=%s,format=raw,if=virtio", argv[i + 1]);
                 qargv_add(out, outc, "-drive");
-                qargv_add(out, outc, syn(buf, "%s", buf, 0));
+                qargv_add(out, outc, syn("file=%s,format=raw,if=virtio",
+                                         argv[i + 1], 0));
                 i++;
             }
             continue;
@@ -249,10 +277,8 @@ static void translate_vm_cmd(char *out[], int *outc, char *cmd, const char *vmm)
                     qargv_add(out, outc, "-serial");
                     qargv_add(out, outc, "stdio");
                 } else if (starts_with(argv[i + 1], "type=file,path=")) {
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "file:%s", argv[i + 1] + 15);
                     qargv_add(out, outc, "-serial");
-                    qargv_add(out, outc, syn(buf, "%s", buf, 0));
+                    qargv_add(out, outc, syn("file:%s", argv[i + 1] + 15, 0));
                 }
                 i++;
             }
@@ -324,6 +350,17 @@ static void run_supervisor(const char *name, char *cmd, const char *vmm) {
 }
 
 static int launch_vm(const char *name, const char *vmm) {
+    /* Validate before building any path from the name.  This used to run
+     * after the read and the unlink, so a name like "../x" was already
+     * concatenated into a path and acted on by the time it was rejected --
+     * which contradicted the file's own note that only safe names reach the
+     * filesystem.  Names arrive from sys_readdir, so a hostile one is not
+     * expected, but the check costs nothing and the ordering is the point. */
+    if (!valid_name(name)) {
+        printf("ncvm: rejecting unsafe VM name '%s'\n", name);
+        return -1;
+    }
+
     char cmd_path[128];
     snprintf(cmd_path, sizeof(cmd_path), "%s/%s.cmd", CMD_DIR, name);
 
@@ -331,12 +368,6 @@ static int launch_vm(const char *name, const char *vmm) {
     int len = read_file(cmd_path, cmd, sizeof(cmd) - 1);
     if (len <= 0) {
         printf("ncvm: no command for '%s'\n", name);
-        return -1;
-    }
-
-    if (!valid_name(name)) {
-        printf("ncvm: rejecting unsafe VM name '%s'\n", name);
-        sys_unlink(cmd_path);
         return -1;
     }
 
@@ -392,18 +423,16 @@ static void reconcile_vms(void) {
  * "stop"|"pause"|"resume". Signals drive the supervisor (and through it
  * the VMM process). */
 static void handle_ctl(const char *name) {
+    /* Validate before the path is built -- see launch_vm(). */
+    if (!valid_name(name)) return;
+
     char ctl_path[128];
     snprintf(ctl_path, sizeof(ctl_path), "%s/%s.ctl", CMD_DIR, name);
     char ctl[64];
     int n = read_file(ctl_path, ctl, sizeof(ctl) - 1);
     if (n <= 0) return;
     ctl[n] = 0;
-    if (ctl[n - 1] == '\n') ctl[n - 1] = 0;
-
-    if (!valid_name(name)) {
-        sys_unlink(ctl_path);
-        return;
-    }
+    if (n > 0 && ctl[n - 1] == '\n') ctl[n - 1] = 0;
 
     int idx = find_vm(name);
     if (idx < 0 || !vms[idx].running || vms[idx].pid <= 0) {

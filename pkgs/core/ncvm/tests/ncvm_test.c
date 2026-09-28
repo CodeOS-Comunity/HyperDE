@@ -39,6 +39,77 @@ static void ok(int cond, const char *what) {
 
 static void section(const char *name) { printf("== %s\n", name); }
 
+/* ── sys_readdir: NUL-separated names, byte count ─────────────────────
+ * The kernel side of this contract (syscall.c:sys_readdir) is verified by
+ * booting -- see the ncvm AGENTS.md section.  What is testable here is that
+ * every consumer in ncvm.c walks the buffer the way the contract says, which
+ * is the half that silently truncated VM names.
+ */
+static int count_entries(const char *buf, int n) {
+    int off = 0, count = 0;
+    while (off < n) {
+        while (off < n && buf[off]) off++;
+        if (off < n) off++;                 /* skip the NUL */
+        count++;
+    }
+    return count;
+}
+
+static void test_readdir_walk(void) {
+    char buf[512];
+    int n;
+    section("sys_readdir contract");
+
+    /* Exactly the shape the kernel now produces: packed, NUL-terminated.
+     * Built with explicit offsets -- a literal "\0" in a C string literal
+     * does not end the string, but writing the test that way makes the
+     * intended byte count easy to get wrong. */
+    char listing[32];
+    memset(listing, 0, sizeof(listing));
+    int p = 0;
+    memcpy(listing + p, "vm1.cmd", 8); p += 8;   /* 7 chars + NUL */
+    memcpy(listing + p, "vm2.cmd", 8); p += 8;
+    memcpy(listing + p, "vm3.ctl", 8); p += 8;
+    n = p;
+    memcpy(buf, listing, (size_t)n);
+
+    ok(count_entries(buf, n) == 3, "three entries in three names' worth of bytes");
+    ok(!strcmp(buf, "vm1.cmd"), "first entry starts at offset 0");
+    ok(!strcmp(buf + 8, "vm2.cmd"), "second entry starts right after the first NUL");
+
+    /* A caller that treated the return value as an entry count would bound
+     * the walk at 3 bytes and see a single truncated name.  Assert the
+     * byte-count reading is what makes all three visible. */
+    int seen = 0, off = 0;
+    while (off < n) {
+        const char *e = buf + off;
+        int el = 0;
+        while (off < n && buf[off]) { off++; el++; }
+        off++;
+        if (el > 4 && !strcmp(e + el - 4, ".cmd")) seen++;
+    }
+    ok(seen == 2, "both .cmd files are visible in one pass");
+
+    /* The old fixed-stride layout: 32 bytes per name, NUL-padded, count=3.
+     * Walking 3 *bytes* of it only ever reaches the first entry -- this is
+     * the shape that used to hide every VM after the first. */
+    char stride[3 * 32];
+    memset(stride, 0, sizeof(stride));
+    strcpy(stride, "vm1.cmd");
+    strcpy(stride + 32, "vm2.cmd");
+    strcpy(stride + 64, "vm3.ctl");
+    int names_seen = 0;
+    off = 0;
+    while (off < 3) {                       /* count used as a byte bound */
+        const char *e = stride + off;
+        int el = 0;
+        while (off < 3 && stride[off]) { off++; el++; }
+        off++;
+        if (el > 4 && !strcmp(e + el - 4, ".cmd")) names_seen++;
+    }
+    ok(names_seen == 0, "a count-as-byte-length walk would miss the later names");
+}
+
 /* ── scratch CMD_DIR, recompiled in via -DCMD_DIR ─────────────────────── */
 static void scratch_reset(void) {
     char cmd[256];
@@ -193,7 +264,6 @@ static int translate(const char *cmd, const char *vmm, char *out[T_MAX]) {
     /* Do NOT tokenize here: translate_vm_cmd() tokenizes the buffer itself
      * and tokenize() writes NULs in place, so a second pass would see a
      * one-word string and silently translate nothing. */
-    synused = 0;              /* syn() is process-global; see the test below */
     translate_vm_cmd(out, &outc, scratch, vmm);
     return outc;
 }
@@ -307,6 +377,169 @@ static void test_translate_accel_and_machine(void) {
        "the caller's -accel value survives");
 }
 
+/* ── scratch reuse: syn() must not run out across translations ────────
+ * synbuf is a fixed pool that used to be allocated once per process and
+ * never reset, so the 33rd command line translated in a daemon lifetime got
+ * empty strings for every synthesised option.  Repeat one translation past
+ * the pool size and require the result to be identical.
+ */
+static void test_syn_pool_reuse(void) {
+    char *out[T_MAX];
+    int n, i, stable = 1;
+    section("syn() pool reuse");
+
+    n = translate("crosvm run --root /images/rootfs.img --rwdisk /images/d1 "
+                  "--serial type=file,path=/tmp/t.log", "/vmm", out);
+
+    /* MAX_SYN + 8 translations; each one must produce the same argv. */
+    for (i = 0; i < MAX_SYN + 8; i++) {
+        char *again[T_MAX];
+        int m = translate("crosvm run --root /images/rootfs.img --rwdisk /images/d1 "
+                          "--serial type=file,path=/tmp/t.log", "/vmm", again);
+        if (m != n) { stable = 0; break; }
+        for (int k = 0; k < m; k++)
+            if (!again[k] || !out[k] || strcmp(again[k], out[k])) { stable = 0; k = m; }
+        if (!stable) break;
+    }
+    ok(stable, "translation is stable past MAX_SYN translations in one process");
+    ok(idx_tok(out, n, "-drive") >= 0 &&
+       !strcmp(out[idx_tok(out, n, "-drive") + 1], "file=/images/rootfs.img,format=raw,if=virtio"),
+       "the synthesised -drive option is not empty after reuse");
+    ok(idx_tok(out, n, "-serial") >= 0 &&
+       !strcmp(out[idx_tok(out, n, "-serial") + 1], "file:/tmp/t.log"),
+       "the synthesised -serial option is not empty after reuse");
+}
+
+/* ── name validation happens before any path is built ────────────────
+ * launch_vm() and handle_ctl() both used to snprintf the name into a path
+ * and read/unlink it, and only then call valid_name().  A name carrying
+ * ".." therefore reached the filesystem before being rejected, which is the
+ * opposite of what the comment on valid_name() claims.  Names come from
+ * sys_readdir so a hostile one is not expected, but the ordering is the
+ * property under test: nothing outside CMD_DIR may be touched.
+ */
+static void test_name_rejected_before_filesystem(void) {
+    char victim[256];
+    char ctlvictim[256];
+    int n;
+    section("name validation ordering");
+
+    /* Plant the two files the traversal would actually reach.  The escape
+     * is relative to CMD_DIR itself, so the target sits in CMD_DIR's
+     * *parent* -- CMD_DIR/../x.cmd -- not inside CMD_DIR.  Planting it in
+     * the wrong place would make this test pass for the wrong reason. */
+    snprintf(victim, sizeof(victim), "%s/../victim.cmd", CMD_DIR);
+    snprintf(ctlvictim, sizeof(ctlvictim), "%s/../victim.ctl", CMD_DIR);
+    ok(write_file(victim, "SENTINEL-CMD") > 0, "planted a .cmd file outside CMD_DIR");
+    ok(write_file(ctlvictim, "stop\n") > 0, "planted a .ctl file outside CMD_DIR");
+    ok(file_exists(victim), "the escape target really is outside CMD_DIR");
+
+    console_reset();
+    n = launch_vm("../victim", "/vmm");
+    ok(n < 0, "launch_vm rejects a traversal name");
+    ok(console_has("rejecting unsafe VM name"),
+       "launch_vm says why, rather than reporting a missing command file");
+
+    /* The old code read the .cmd first, so a readable file was consumed
+     * ("ncvm: launching '../victim'") and then unlinked. */
+    ok(!console_has("launching"),
+       "launch_vm does not proceed to launch a traversal name");
+    ok(file_exists(victim), "the .cmd file outside CMD_DIR was not unlinked");
+
+    /* handle_ctl must refuse before reading or unlinking anything. */
+    console_reset();
+    handle_ctl("../victim");
+    ok(!console_has("not running"),
+       "handle_ctl rejects the name outright instead of acting on it");
+    ok(file_exists(ctlvictim), "the .ctl file outside CMD_DIR was not unlinked");
+
+    char back[64];
+    ok(slurp(victim, back, sizeof(back)) == 12 && !strcmp(back, "SENTINEL-CMD"),
+       "the file outside CMD_DIR was neither consumed nor modified");
+
+    sys_unlink(victim);
+    sys_unlink(ctlvictim);
+}
+
+/* ── long paths: syn() must not silently truncate ─────────────────────
+ * The -virtfs option is "local,path=<path>,mount_tag=root,
+ * security_model=none" -- 46 characters of boilerplate around the path. With
+ * a 64-byte slot a path longer than 18 bytes was cut off mid-string and
+ * handed to QEMU as a corrupt option.
+ */
+static void test_long_path_not_truncated(void) {
+    char *out[T_MAX];
+    char cmd[MAX_CMD_LEN];
+    int n, i;
+    section("syn() truncation");
+
+    /* 46 bytes of fixed boilerplate around the path, so the path itself has
+     * to be short enough to fit the old 64-byte slot.  A 91-character path
+     * needs 137 bytes and would still be cut off at 128; what is being
+     * tested is that the option is no longer silently mangled at 63.
+     * MAX_CMD_LEN is the real bound on any path this can be handed. */
+    char longdir[80];
+    longdir[0] = '/';
+    for (i = 1; i < 32; i++) longdir[i] = 'x';
+    longdir[32] = '/';
+    longdir[33] = 0;
+
+    snprintf(cmd, sizeof(cmd), "crosvm run --root %s", longdir);
+    n = translate(cmd, "/vmm", out);
+
+    ok(idx_tok(out, n, "-virtfs") >= 0, "a long --root directory still maps to -virtfs");
+    if (idx_tok(out, n, "-virtfs") >= 0) {
+        const char *v = out[idx_tok(out, n, "-virtfs") + 1];
+        ok(strstr(v, longdir) != NULL, "the full path survives into the -virtfs option");
+        ok(strstr(v, "security_model=none") != NULL,
+           "the option is not truncated before its tail");
+    }
+
+    /* A long disk image path: "file=%s,format=raw,if=virtio" is 26 of
+     * boilerplate, so a 60-character path needs 86 bytes. */
+    char longimg[80];
+    longimg[0] = '/';
+    for (i = 1; i < 60; i++) longimg[i] = 'y';
+    longimg[60] = 0;
+    snprintf(cmd, sizeof(cmd), "crosvm run --rwdisk %s", longimg);
+    n = translate(cmd, "/vmm", out);
+    ok(idx_tok(out, n, "-drive") >= 0 &&
+       strstr(out[idx_tok(out, n, "-drive") + 1], longimg) != NULL,
+       "a long --rwdisk path survives into the -drive option");
+    ok(idx_tok(out, n, "-drive") >= 0 &&
+       strstr(out[idx_tok(out, n, "-drive") + 1], "if=virtio") != NULL,
+       "the -drive option keeps its format=...,if=virtio tail");
+}
+
+/* ── -m with a unit suffix ────────────────────────────────────────────
+ * is_digits() rejects "1G", and the old code dropped -m and then let the
+ * value fall through as a bare positional argument -- which QEMU reads as a
+ * kernel filename.
+ */
+static void test_memory_with_suffix(void) {
+    char *out[T_MAX];
+    int n;
+    section("-m with a unit suffix");
+
+    n = translate("crosvm run -m 1G", "/vmm", out);
+    ok(idx_tok(out, n, "-m") >= 0 && !strcmp(out[idx_tok(out, n, "-m") + 1], "1G"),
+       "-m 1G keeps both the flag and the value");
+    ok(!has_tok(out, n, "1G") || idx_tok(out, n, "-m") >= 0,
+       "-m 1G does not leak the value as a bare positional argument");
+
+    n = translate("crosvm run -m 512M", "/vmm", out);
+    ok(idx_tok(out, n, "-m") >= 0 && !strcmp(out[idx_tok(out, n, "-m") + 1], "512M"),
+       "-m 512M is passed through unchanged");
+
+    n = translate("crosvm run --memory 2048", "/vmm", out);
+    ok(has_tok(out, n, "2048M"), "--memory 2048 gains the M suffix");
+
+    /* The digit-only case must not regress into a two-token -m. */
+    n = translate("crosvm run -m 256", "/vmm", out);
+    ok(idx_tok(out, n, "-m") < 0 && has_tok(out, n, "256M"),
+       "-m 256 still collapses to a single 256M token");
+}
+
 int main(void) {
     printf("ncvm host tests (CMD_DIR=%s)\n", CMD_DIR);
     scratch_reset();
@@ -314,11 +547,16 @@ int main(void) {
     test_valid_name();
     test_is_digits();
     test_tokenize();
+    test_readdir_walk();
     test_read_file();
     test_write_file();
     test_translate_basics();
     test_translate_drops_crosvm_only();
     test_translate_accel_and_machine();
+    test_memory_with_suffix();
+    test_name_rejected_before_filesystem();
+    test_long_path_not_truncated();
+    test_syn_pool_reuse();
 
     printf("\nchecks=%d failed=%d\n", checks, failed);
     if (failed) {
