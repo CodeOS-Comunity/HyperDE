@@ -39,6 +39,17 @@ static void ok(int cond, const char *what) {
 
 static void section(const char *name) { printf("== %s\n", name); }
 
+/* Variadic ok(): the label is formatted so a loop can report which case
+ * failed instead of the same string three times. */
+static void okf(int cond, const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    ok(cond, buf);
+}
+
 /* ── sys_readdir: NUL-separated names, byte count ─────────────────────
  * The kernel side of this contract (syscall.c:sys_readdir) is verified by
  * booting -- see the ncvm AGENTS.md section.  What is testable here is that
@@ -410,6 +421,242 @@ static void test_syn_pool_reuse(void) {
        "the synthesised -serial option is not empty after reuse");
 }
 
+/* ── lifecycle signals reach the VMM, not the supervisor ─────────────
+ * launch_vm() forks a supervisor which forks the VMM and then blocks in
+ * wait().  Signalling the supervisor kills the waiter and orphans a running
+ * QEMU, so the old "stop" reported success and left the VM up; pause/resume
+ * were worse, because the supervisor was not stopped by the pause of its
+ * child.
+ *
+ * The stand-in for the VMM is a real child of this test which traps the
+ * three signals and appends a line for each one it receives.  So "did the
+ * signal reach the VM" is answered by what the VM did, not by what the
+ * daemon claimed -- and the supervisor is a second, real child that is
+ * deliberately *not* trapping anything, so signalling the wrong one is
+ * visible as a missing line.
+ */
+/* Async-signal-safe enough for a test: open/write/close, no allocation. */
+static void stub_trap(int sig) {
+    const char *marker = getenv("CODEOS_TEST_VMM_MARKER");
+    if (!marker) return;
+    int fd = open(marker, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        char line[32];
+        int n = snprintf(line, sizeof(line), "sig=%d\n", sig);
+        if (write(fd, line, (size_t)n) < 0) { /* nothing useful to do here */ }
+        close(fd);
+    }
+}
+
+/* SIGSTOP cannot be trapped -- it is delivered and then the process stops --
+ * so only the other two leave a record.  The pause case is asserted through
+ * the wait channel instead. */
+static void vmm_stub(void) {
+    if (!getenv("CODEOS_TEST_VMM_MARKER")) _exit(3);
+    for (int sig = 1; sig < 32; sig++) signal(sig, SIG_IGN);
+    signal(SIGTERM, stub_trap);
+    signal(SIGCONT, stub_trap);
+    for (;;) pause();
+}
+
+static int vmm_alive(int pid) {
+    /* Signal 0 performs the permission and existence check and delivers
+     * nothing, so this asks "does this pid still exist" without side
+     * effects.  EPERM would mean it exists but is not ours. */
+    if (kill(pid, 0) == 0) return 1;
+    return errno == EPERM;
+}
+
+/* The process state letter from /proc/<pid>/stat: 'T' stopped, 'S' sleeping,
+ * 'R' running, 'Z' exited.  This is the direct observation for pause and
+ * resume -- signal traps cannot see SIGSTOP (it cannot be caught) and, on
+ * Linux, a non-traced child produces no "continued" wait report either, so
+ * the process state is the only unambiguous evidence that the VMM actually
+ * stopped and actually ran again.  The comm field may contain spaces and
+ * parentheses, so parse after the final ')'. */
+static char proc_state(int pid) {
+    char path[64], buf[512];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *f = fopen(path, "rb");
+    if (!f) return '?';
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    char *close_paren = strrchr(buf, ')');
+    if (!close_paren || close_paren[1] != ' ' || !close_paren[2]) return '?';
+    return close_paren[2];
+}
+
+/* Poll for the state to become `want`, bounded so a signal that never
+ * arrives fails the check instead of stalling the suite. */
+static int wait_proc_state(int pid, char want, int ms) {
+    for (int elapsed = 0; elapsed < ms; elapsed += 20) {
+        if (proc_state(pid) == want) return 1;
+        sys_sleep(20);
+    }
+    return 0;
+}
+
+static void test_ctl_signals_reach_the_vmm(void) {
+    char ctlpath[256], pidpath[256], marker[256], back[512], payload[32];
+    section("lifecycle signals reach the VMM");
+
+    snprintf(marker, sizeof(marker), "%s/vmm-signals.log", CMD_DIR);
+    sys_unlink(marker);
+    setenv("CODEOS_TEST_VMM_MARKER", marker, 1);
+
+    /* Track a VM by hand rather than via launch_vm(): the fork chain is not
+     * what is under test here, the signal target is.  vmm_pid is a child
+     * that traps signals; pid is a second child that does not, standing in
+     * for the supervisor. */
+    /* fflush before every fork: stdout is block-buffered when redirected to a
+     * file, so a forked child inherits the parent's pending bytes and re-emits
+     * them at exit.  That printed the run's header once per child, which made
+     * a single clean pass look like it had run several times. */
+    fflush(stdout);
+    int vmm_pid = fork();
+    if (vmm_pid == 0) { fflush(stdout); vmm_stub(); _exit(0); }
+    fflush(stdout);
+    int sup_pid = fork();
+    if (sup_pid == 0) { fflush(stdout); for (;;) pause(); }
+
+    snprintf(pidpath, sizeof(pidpath), "%s/sigtest.pid", CMD_DIR);
+    char pbuf[16];
+    snprintf(pbuf, sizeof(pbuf), "%d\n", vmm_pid);
+    ok(write_file(pidpath, pbuf) > 0, "the supervisor published the VMM pid");
+
+    strncpy(vms[0].name, "sigtest", 31);
+    vms[0].name[31] = 0;
+    vms[0].pid = sup_pid;          /* the wrong target, on purpose */
+    vms[0].vmm_pid = 0;            /* not yet learned */
+    vms[0].running = 1;
+
+    /* poll_vmm_pid() is what learns it from <name>.pid. */
+    poll_vmm_pid();
+    ok(vms[0].vmm_pid == vmm_pid,
+       "poll_vmm_pid learns the VMM pid from <name>.pid");
+    ok(vms[0].vmm_pid != vms[0].pid,
+       "the VMM pid and the supervisor pid are tracked separately");
+
+    /* Each directive must reach the VMM and leave the supervisor alone. */
+    snprintf(ctlpath, sizeof(ctlpath), "%s/sigtest.ctl", CMD_DIR);
+    struct { const char *dir; int sig; } cases[] = {
+        { "pause",  SIGSTOP },
+        { "resume", SIGCONT },
+        { "stop",   SIGTERM },
+    };
+    for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        console_reset();
+        char state_before = proc_state(vmm_pid);
+        snprintf(payload, sizeof(payload), "%s\n", cases[k].dir);
+        write_file(ctlpath, payload);
+        handle_ctl("sigtest");
+        okf(console_has("(vmm pid"), "%s names the VMM as the signal target", cases[k].dir);
+
+        int want = cases[k].sig;
+        if (want == SIGSTOP) {
+            okf(wait_proc_state(vmm_pid, 'T', 2000),
+               "pause stopped the VMM (its state is now %c)", proc_state(vmm_pid));
+        } else if (want == SIGCONT) {
+            /* Assert the precondition, or this check passes for free: if the
+             * pause never happened the VMM is already 'S' and waiting for 'S'
+             * proves nothing.  The resume is only meaningful from 'T'. */
+            okf(state_before == 'T',
+               "the VMM really was stopped before the resume (state was %c)",
+               state_before);
+            okf(wait_proc_state(vmm_pid, 'S', 2000),
+               "resume ran the VMM again (state is now %c)", proc_state(vmm_pid));
+            sys_sleep(150);          /* let the SIGCONT trap append */
+        } else {
+            sys_sleep(150);          /* let the SIGTERM trap append */
+            char want_line[32];
+            snprintf(want_line, sizeof(want_line), "sig=%d", want);
+            okf(slurp(marker, back, sizeof(back)) > 0 &&
+                strstr(back, want_line) != NULL,
+                "stop (SIGTERM) reached the VMM, not the supervisor");
+        }
+        okf(vmm_alive(sup_pid), "the supervisor was not signalled by '%s'", cases[k].dir);
+        okf(proc_state(sup_pid) != 'T', "the supervisor was never stopped by '%s'",
+            cases[k].dir);
+    }
+
+    forget_vm(0);
+    kill(vmm_pid, SIGKILL);
+    kill(sup_pid, SIGKILL);
+    waitpid(vmm_pid, NULL, 0);
+    waitpid(sup_pid, NULL, 0);
+    sys_unlink(ctlpath);
+    sys_unlink(pidpath);
+    sys_unlink(marker);
+    unsetenv("CODEOS_TEST_VMM_MARKER");
+}
+
+/* ── a directive with no VMM pid is deferred, not misapplied ─────────
+ * There is a real window between launch_vm() returning and the supervisor
+ * writing <name>.pid.  A stop arriving in that window must not be applied
+ * to the supervisor, which is the bug this whole change is about. */
+static void test_ctl_deferred_without_vmm_pid(void) {
+    char ctlpath[256], pidpath[256];
+    section("deferred directive");
+
+    fflush(stdout);
+    int sup_pid = fork();
+    if (sup_pid == 0) { fflush(stdout); for (;;) pause(); }
+
+    strncpy(vms[0].name, "defer", 31);
+    vms[0].name[31] = 0;
+    vms[0].pid = sup_pid;
+    vms[0].vmm_pid = 0;             /* nothing published yet */
+    vms[0].running = 1;
+
+    /* No <name>.pid on disk at all. */
+    snprintf(pidpath, sizeof(pidpath), "%s/defer.pid", CMD_DIR);
+    sys_unlink(pidpath);
+
+    snprintf(ctlpath, sizeof(ctlpath), "%s/defer.ctl", CMD_DIR);
+    console_reset();
+    write_file(ctlpath, "stop\n");
+    handle_ctl("defer");
+
+    ok(console_has("no VMM pid yet"),
+       "the directive is deferred while the VMM pid is unknown");
+    ok(!console_has("(vmm pid"),
+       "no signal is sent anywhere while the VMM pid is unknown");
+    ok(vmm_alive(sup_pid), "the supervisor survived the deferred directive");
+    ok(vms[0].running, "the VM is still marked running, pending reconcile");
+
+    /* The kernel's snapshot directive uses the same .ctl channel.  It is
+     * rejected on its own terms -- it is not a lifecycle signal and must not
+     * be sent to any pid -- and it is named in the log rather than swallowed.
+     * Note the directive check runs before the vmm_pid check, so this does
+     * not take the "deferring" path even with no pid known. */
+    console_reset();
+    write_file(ctlpath, "snapshot golden\n");
+    handle_ctl("defer");
+    ok(console_has("ignoring unknown directive"),
+       "an unrecognised directive is reported, not swallowed silently");
+    ok(!console_has("(vmm pid"),
+       "an unrecognised directive is not turned into a signal");
+    ok(!file_exists(ctlpath),
+       "an unrecognised directive is consumed instead of retried forever");
+    ok(vmm_alive(sup_pid), "the supervisor was untouched by the snapshot request");
+
+    /* A stop is different: it is a real directive, so with no pid known it
+     * must be *deferred* (file kept for the next poll) rather than dropped. */
+    console_reset();
+    write_file(ctlpath, "stop\n");
+    handle_ctl("defer");
+    ok(console_has("no VMM pid yet"),
+       "a real directive with no VMM pid is deferred, not applied or dropped");
+    ok(file_exists(ctlpath),
+       "a deferred directive is left in place for the next poll");
+
+    forget_vm(0);
+    kill(sup_pid, SIGKILL);
+    waitpid(sup_pid, NULL, 0);
+    sys_unlink(ctlpath);
+}
+
 /* ── name validation happens before any path is built ────────────────
  * launch_vm() and handle_ctl() both used to snprintf the name into a path
  * and read/unlink it, and only then call valid_name().  A name carrying
@@ -541,6 +788,11 @@ static void test_memory_with_suffix(void) {
 }
 
 int main(void) {
+    /* Safety net: the lifecycle tests fork real children and wait on them.
+     * A regression that stops a signal being delivered must fail the suite,
+     * not stall it, so a hard timeout backs up every bounded wait. */
+    alarm(120);
+
     printf("ncvm host tests (CMD_DIR=%s)\n", CMD_DIR);
     scratch_reset();
 
@@ -554,6 +806,8 @@ int main(void) {
     test_translate_drops_crosvm_only();
     test_translate_accel_and_machine();
     test_memory_with_suffix();
+    test_ctl_signals_reach_the_vmm();
+    test_ctl_deferred_without_vmm_pid();
     test_name_rejected_before_filesystem();
     test_long_path_not_truncated();
     test_syn_pool_reuse();

@@ -44,10 +44,17 @@
 
 #define MAX_VMS        8
 
-/* Static VM tracking table */
+/* Static VM tracking table.
+ *
+ * pid is the *supervisor*, not the VMM: launch_vm() forks a supervisor
+ * (run_supervisor) which in turn forks the actual ncvm/QEMU process and
+ * then blocks in wait().  Signalling the supervisor does nothing to the
+ * VM -- it just kills the waiter, orphaning a QEMU that keeps running. So
+ * the VMM's pid is tracked separately, and lifecycle signals go to that. */
 typedef struct {
     char name[32];
-    int  pid;
+    int  pid;        /* supervisor                              */
+    int  vmm_pid;    /* the ncvm/QEMU process it forked          */
     int  running;
 } vm_entry_t;
 
@@ -70,6 +77,7 @@ static void forget_vm(int idx) {
     if (idx < 0 || idx >= MAX_VMS) return;
     vms[idx].name[0] = 0;
     vms[idx].pid = 0;
+    vms[idx].vmm_pid = 0;
     vms[idx].running = 0;
 }
 
@@ -305,6 +313,23 @@ static void translate_vm_cmd(char *out[], int *outc, char *cmd, const char *vmm)
     out[*outc] = 0;
 }
 
+/* Read <CMD_DIR>/<name>.pid, the pid of the running VMM.
+ *
+ * This is the IPC the supervisor already uses to publish the VM's pid for
+ * vm_sync_states(), so reading it back is how the daemon learns which
+ * process a lifecycle signal has to reach.  Returns 0 when the file is not
+ * there yet or does not parse. */
+static int vmm_pid_for(const char *name) {
+    char path[128], buf[32];
+    snprintf(path, sizeof(path), "%s/%s.pid", CMD_DIR, name);
+    if (read_file(path, buf, sizeof(buf) - 1) <= 0) return 0;
+
+    int pid = 0;
+    for (const char *p = buf; *p >= '0' && *p <= '9'; p++)
+        pid = pid * 10 + (*p - '0');
+    return pid > 0 ? pid : 0;
+}
+
 /* ── supervisor child: wait for the VM, publish .pid / .exit ────────── */
 static void run_supervisor(const char *name, char *cmd, const char *vmm) {
     char *qargv[MAX_ARGS];
@@ -396,11 +421,26 @@ static int launch_vm(const char *name, const char *vmm) {
     strncpy(vms[idx].name, name, 31);
     vms[idx].name[31] = 0;
     vms[idx].pid = sup;
+    vms[idx].vmm_pid = 0;        /* the supervisor publishes it; see poll_vmm_pid */
     vms[idx].running = 1;
     printf("ncvm: '%s' launching (supervisor pid %d)\n", name, sup);
 
     sys_unlink(cmd_path);
     return 0;
+}
+
+/* Learn the VMM pid for any VM still missing one.
+ *
+ * The supervisor writes <name>.pid after forking the VMM, which is a
+ * separate process, so the daemon cannot learn it from the fork() return
+ * value. It is picked up on the next poll instead: cheap, and it happens
+ * well before a stop/pause/resume directive for that VM can arrive. */
+static void poll_vmm_pid(void) {
+    for (int i = 0; i < MAX_VMS; i++) {
+        if (!vms[i].name[0] || !vms[i].running || vms[i].vmm_pid > 0) continue;
+        int pid = vmm_pid_for(vms[i].name);
+        if (pid > 0) vms[i].vmm_pid = pid;
+    }
 }
 
 static void reconcile_vms(void) {
@@ -420,8 +460,19 @@ static void reconcile_vms(void) {
 }
 
 /* Lifecycle request from the kernel: <name>.ctl contains
- * "stop"|"pause"|"resume". Signals drive the supervisor (and through it
- * the VMM process). */
+ * "stop"|"pause"|"resume".
+ *
+ * Signals go to the VMM, never to the supervisor. The supervisor is a
+ * waiter: it forked the VMM and is blocked in sys_wait(), so SIGTERM to it
+ * kills the waiter and orphans a QEMU that keeps running -- `ncvm stop` used
+ * to report success and leave the VM up. SIGSTOP/SIGCONT were worse, because
+ * the supervisor was not stopped by the pause of its child: it stayed in
+ * wait() and a resume did nothing at all, so the VM ran on untouched while
+ * the shell showed PAUSED.
+ *
+ * If the VMM pid is not known yet the directive is refused rather than
+ * misapplied, and the file is left in place for the next poll -- the kernel
+ * retries via vm_sync_states(). */
 static void handle_ctl(const char *name) {
     /* Validate before the path is built -- see launch_vm(). */
     if (!valid_name(name)) return;
@@ -441,15 +492,36 @@ static void handle_ctl(const char *name) {
         return;
     }
 
-    printf("ncvm: '%s' <- %s\n", name, ctl);
+    /* Last chance to pick up the pid, in case the directive raced the
+     * supervisor's first write. */
+    if (vms[idx].vmm_pid <= 0) vms[idx].vmm_pid = vmm_pid_for(name);
+    if (strcmp(ctl, "stop") != 0 && strcmp(ctl, "pause") != 0 &&
+        strcmp(ctl, "resume") != 0) {
+        /* Unknown directive (the kernel also writes "snapshot <name>").
+         * Consume it so it is not retried forever, but say so. */
+        printf("ncvm: '%s' ignoring unknown directive '%s'\n", name, ctl);
+        sys_unlink(ctl_path);
+        return;
+    }
+
+    if (vms[idx].vmm_pid <= 0) {
+        /* No VMM pid yet: refuse honestly rather than signalling the
+         * supervisor. Leave the file for the next poll. */
+        printf("ncvm: '%s' has no VMM pid yet, deferring %s\n", name, ctl);
+        return;
+    }
+
+    printf("ncvm: '%s' <- %s (vmm pid %d)\n", name, ctl, vms[idx].vmm_pid);
 
     if (strcmp(ctl, "stop") == 0) {
-        sys_kill(vms[idx].pid, KILL_SIGTERM);
-        vms[idx].running = 0;          /* supervisor publishes final status */
+        sys_kill(vms[idx].vmm_pid, KILL_SIGTERM);
+        /* Leave running=1: the supervisor still has to publish .exit and
+         * .sup, and reconcile_vms() is what frees the slot. Clearing it
+         * here would leak the entry and skip the reconcile. */
     } else if (strcmp(ctl, "pause") == 0) {
-        sys_kill(vms[idx].pid, KILL_SIGSTOP);
+        sys_kill(vms[idx].vmm_pid, KILL_SIGSTOP);
     } else if (strcmp(ctl, "resume") == 0) {
-        sys_kill(vms[idx].pid, KILL_SIGCONT);
+        sys_kill(vms[idx].vmm_pid, KILL_SIGCONT);
     }
 
     sys_unlink(ctl_path);
@@ -493,6 +565,7 @@ static int daemon_main(void) {
                 }
             }
         }
+        poll_vmm_pid();
         reconcile_vms();
         sys_sleep(POLL_MS);
     }
