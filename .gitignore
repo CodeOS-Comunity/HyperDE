@@ -67,6 +67,11 @@ qt6/sysroot/
 __pycache__/
 *.pyc
 
+# Scratch header/source variants kept alongside the real ones while working out
+# an alignment (ncvm.h.align740 is ncvm.h with IOBASE 0x630 instead of 0x740).
+# Nothing in the tree references them and no rule generates them.
+*.align740
+
 # Logs & serial capture
 *.log
 kernel/serial.log
