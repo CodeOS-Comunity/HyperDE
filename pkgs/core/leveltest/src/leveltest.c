@@ -14,10 +14,13 @@
 #include "string.h"
 
 static int enter_container(int argc, char **argv);
+static int check_gate(int argc, char **argv);
 
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--into") == 0)
         return enter_container(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "--gate") == 0)
+        return check_gate(argc, argv);
 
     int me = sys_getpid();
     printf("leveltest: pid %d\n", me);
@@ -75,6 +78,79 @@ int main(int argc, char **argv) {
             sys_sleep(ms);
         }
     }
+    return 0;
+}
+
+/* leveltest --gate <name> -- did this level actually get to create a container?
+ *
+ * This exercises level_gate(), the gate in syscall.c that fronts the
+ * container/VM state-changing syscalls. It is a different enforcement point
+ * from gated_kill(), which the rest of this file covers, so nothing else here
+ * touches it.
+ *
+ * The discriminator is the return value, because container_create() returns
+ * the new container's id on success and -1 on every failure, while level_gate()
+ * returns -EPERM. A positive id is therefore unambiguous proof the gate let the
+ * call through; there is no other way to get one.
+ *
+ * A negative result is NOT proof of a refusal on its own, and this program
+ * does not claim it is. -1 is also what "already exists", "no slots
+ * available" and "unknown image" return, so a lone "-1" is consistent with a
+ * gate that is wide open and a broken image path. Pair it with a control:
+ *
+ *   systemm task run --level 2 /bin/leveltest --gate lvl2probe
+ *   container create ctrlprobe android-stock
+ *   container list -a
+ *
+ * The shell's `container` builtin calls container_create() directly, bypassing
+ * the gate, so a successful `container create` in the same session proves the
+ * image path, slot table and namespace setup are all fine. Same binary, same
+ * image, same moment -- the gate is the only variable. If the control fails,
+ * this test proved nothing and should be reported as inconclusive.
+ *
+ * Note that the level-3 run is *not* available as a control: the shell itself
+ * is level 2, and `task run --level 3` is refused with "level 2 (user) may
+ * not start a task at level 3 (kernel)". That refusal is the anti-escalation
+ * rule working, and it is why the builtin is the control instead.
+ *
+ * Do not use sys_container_list() to check the result. It calls
+ * container_list(), which only returns CONTAINER_RUNNING containers, so a
+ * container that was created but never started is invisible by design and the
+ * test would report "absent" even when creation plainly succeeded.
+ */
+static int check_gate(int argc, char **argv) {
+    const char *name = (argc >= 3) ? argv[2] : "leveltest-gate";
+    const char *image = "android-stock";   /* seeded at boot, so create() can succeed */
+
+    static char names[CONTAINER_MAX][CONTAINER_NAME_MAX];
+
+    /* Refuse to run if the name is already taken: "already exists" returns -1,
+     * which is the same value a refusal returns. */
+    int n0 = sys_container_list(names);
+    for (int i = 0; i < n0; i++) {
+        if (strcmp(names[i], name) == 0) {
+            printf("gate: container '%s' is already running -- refusing to test\n", name);
+            return 2;
+        }
+    }
+
+    printf("gate: leveltest --gate as pid %d, trying to create '%s' from '%s'\n",
+           sys_getpid(), name, image);
+    int rc = sys_container_create(name, image);
+    printf("gate: sys_container_create(\"%s\", \"%s\") = %d\n", name, image, rc);
+
+    if (rc >= 0) {
+        printf("gate: -> GATE PASSED: got container id %d, so this level may "
+               "create containers\n", rc);
+        printf("gate: note -- left '%s' behind; remove it with `appvm rm %s`\n",
+               name, name);
+        return 0;
+    }
+
+    printf("gate: -> gate did not pass: call returned %d and no container id\n", rc);
+    printf("gate:    %d is ambiguous on its own (-EPERM refusal, or an ordinary\n"
+           "gate:    failure such as no slots / unknown image). Confirm against\n"
+           "gate:    the `container create` control before calling this a refusal.\n", rc);
     return 0;
 }
 
