@@ -6,6 +6,10 @@
 *.bin
 *.iso
 *.img
+# disk.img-legacy (kernel/Makefile) does not match *.img -- the suffix breaks
+# the glob -- so the legacy build artifact would show up as untracked.
+disk.img-legacy
+kernel/disk.img-legacy
 *.raw
 *.elf
 *.ftech

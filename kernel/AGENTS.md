@@ -40,6 +40,22 @@ Host needs `x86_64-elf-gcc`, `xorriso`, `python3`, `cargo`, and QEMU for run tar
 - **jengine is currently dead code inside the kernel image.** `jengine.o` is on the link line and links cleanly, but nothing in the kernel references `jengine_eval` — the callers (`pkgs/core/panels/src/panels.cpp`, `pkgs/core/panels/src/calc.c`, `kernel/kernel/codeos_litehtml.cpp`) are *not* among the linked objects, so `--gc-sections` discards the whole thing. `x86_64-elf-nm codeos-1-kernel.bin | grep -c jengine` returns 0. Its only live consumer is the host test binary. A change here is therefore build-verified but **not** runtime-verified inside the OS; do not claim the OS runs scripts until one of those callers is actually built in.
 
 
+## The pre-baked `disk.img` (self-contained ISO)
+- `kernel/disk.img` is **built, populated and shipped on the ISO** at `/disk.img`. `codeos-1.0.iso` depends on it, so `make -C kernel codeos-1.0.iso` produces a self-contained image; the `run-iso*` targets attach it with `-drive file=$(LIVE_DISK_IMG)`.
+- Population uses **`mke2fs -d <dir>`**, which builds the ext2 filesystem straight from a directory tree. That replaces the old `losetup` + `mount` population, which needs root — and root is not available in the build environment. The source tree is `kernel/disk/` (`etc/hostname`, `scripts/*.script`).
+- The image is **partitioned**: `parted` writes an MBR and the filesystem goes in at sector 2048 (1 MiB) as a type `0x83` Linux partition. That type is not cosmetic — `main.c` PHASE 7 only mounts partitions where `p.type == 0x83`, trying `codefs_mount()` first and falling back to `ext2_mount()`.
+- **On success, `main.c` immediately runs `/scripts/test1.script` and `/scripts/complex.script` off the mounted volume.** Those two paths are hardcoded there, so the image must ship them or the mount succeeds and then silently finds nothing. The `disk-img-populate` legacy target is where this came from; it was already broken (it `cp`s `/tmp/test_hello`, which does not exist, and builds `complex.script` with `echo '...\n...'`, which writes literal `\n` because POSIX `echo` does not expand escapes).
+- `disk.img` and `disk.img-legacy` are **two different images on purpose**: the pre-baked populated one, and an empty ext2 for the manual `losetup` targets. They must never share a variable — the legacy block once wrote `$(DISK_IMG) = disk.img`, so building *any* legacy target (`disk-img-format`, `disk-img-populate`, and every `run`/`run-disk`/`run-full`/`run-gpu`/`run-sb` target, which all depend on `disk.img-legacy`) overwrote the populated image with an empty one. Likewise the two size variables are `LIVE_DISK_SIZE_M` and `LEGACY_DISK_SIZE_M`, not both `DISK_SIZE_M`: `?=` only assigns when unset, so a shared name silently gave the legacy image the live one's size.
+- **Verify the contents without root.** There is no `sudo`, so `mount` is unavailable; use `debugfs` against the extracted partition:
+  ```sh
+  dd if=kernel/disk.img of=/tmp/part.img bs=512 skip=2048 status=none
+  debugfs -R "ls -l /bin" /tmp/part.img          # expect exactly len(USER_PROGS) files
+  debugfs -R "cat /scripts/complex.script" /tmp/part.img
+  debugfs -R "dump /bin/shell /tmp/s" /tmp/part.img && cmp /tmp/s kernel/userspace/shell
+  ```
+  A successful `make disk.img` is **not** evidence the filesystem was populated — a silent `cp` failure inside the recipe still exits 0. Count `/bin` against `USER_PROGS` and `cmp` a dumped binary against its source; both are cheap and catch it. To check what actually shipped inside the ISO, `xorriso -osirrox on -indev kernel/codeos-1.0.iso -extract /disk.img /tmp/from-iso.img`.
+- Only ship files something reads. The image used to write `/etc/shell.conf`, `/etc/term.conf` and `/etc/codeos.conf`; no code in the tree reads any of them, and the sources for the first two do not exist. The real convention is `/etc/hostname` (read by `zircon-info`), `/etc/users.conf`, `/etc/wifi.conf` and `/etc/locale.conf` (written by `installer_qt.c`).
+
 ## Todo
 1. Moss-style CCP fetch/sync — stone.index metadata, `fetch fetch`, `sync -u` (in progress)
 2. Improve kernel quality (memory, sched, syscalls, drivers)

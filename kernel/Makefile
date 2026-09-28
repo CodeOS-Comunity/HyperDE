@@ -51,7 +51,15 @@ else
     QEMU_NET ?= -netdev user,id=net0,hostfwd=tcp::7070-:80,hostfwd=tcp::2222-:22 -device e1000,netdev=net0
     QEMU_WIFI ?= -netdev user,id=wifi,hostfwd=tcp::7070-:80,hostfwd=tcp::2222-:22,dhcpstart=10.0.2.100 -device e1000,netdev=wifi
     
-    QEMU_DISK ?= -hda disk.img
+    # Two distinct disk images, deliberately named apart so neither can clobber
+    # the other:
+    #   $(LIVE_DISK_IMG)     disk.img -- pre-baked and populated, shipped on the ISO
+    #   $(LEGACY_DISK_IMG)   disk.img-legacy -- empty ext2 for the losetup targets
+    # The QEMU defaults below attach the legacy one, because every target that
+    # uses them (run, run-disk, run-full, run-gpu, run-sb) depends on
+    # disk.img-legacy. The run-iso* family passes $(LIVE_DISK_IMG) explicitly.
+    QEMU_DISK ?= -hda $(LEGACY_DISK_IMG)
+    QEMU_FULL_DISK ?= -drive file=$(LEGACY_DISK_IMG),format=raw,if=ide
     # Prefer the freestanding cross toolchain, but make the documented gcc
     # fallback real.  This is useful on distributions that only package the
     # regular GNU compiler and also makes the selected toolchain overridable:
@@ -429,11 +437,37 @@ codeos-1-kernel-grub.iso: $(TARGET)
 	$(GRUB_MKRESCUE) -d $(GRUB_DIR) -o $@ /tmp/grub-iso
 	@echo "GRUB ISO: $@"
 
+# Pre-baked disk image for self-contained ISO and live boot (includes userspace apps, config, scripts)
+LIVE_DISK_IMG = disk.img
+# Size is deliberately NOT called DISK_SIZE_M: the legacy block further down also
+# wants that name, and `?=` only assigns when unset, so the first definition wins
+# and the legacy image silently inherited this one. Separate names, separate sizes.
+LIVE_DISK_SIZE_M ?= 128
+
+$(LIVE_DISK_IMG): $(USER_ELF) $(wildcard userspace/ld-codeos) $(wildcard disk/scripts/*.script) $(wildcard disk/etc/*)
+	@echo "Creating pre-baked disk image ($(LIVE_DISK_SIZE_M) MB)..."
+	rm -f $(LIVE_DISK_IMG) fs.img
+	FS_TREE=$$(mktemp -d); \
+	mkdir -p $$FS_TREE/bin $$FS_TREE/lib $$FS_TREE/etc $$FS_TREE/home $$FS_TREE/scripts $$FS_TREE/usr/share/applications; \
+	$(foreach prog,$(USER_PROGS),cp userspace/$(prog) $$FS_TREE/bin/$(prog) 2>/dev/null; ) \
+	cp userspace/ld-codeos $$FS_TREE/lib/ld-codeos.so 2>/dev/null || true; \
+	cp disk/scripts/*.script $$FS_TREE/scripts/ 2>/dev/null || true; \
+	cp disk/etc/* $$FS_TREE/etc/ 2>/dev/null || true; \
+	chmod -R 755 $$FS_TREE/bin $$FS_TREE/lib $$FS_TREE/scripts $$FS_TREE/etc $$FS_TREE/home; \
+	mke2fs -d $$FS_TREE -F -q fs.img $(LIVE_DISK_SIZE_M)M; \
+	dd if=/dev/zero of=$(LIVE_DISK_IMG) bs=1M count=$(LIVE_DISK_SIZE_M) 2>/dev/null; \
+	parted -s $(LIVE_DISK_IMG) mklabel msdos 2>/dev/null; \
+	parted -s $(LIVE_DISK_IMG) mkpart primary ext2 2048s 100% 2>/dev/null; \
+	dd if=fs.img of=$(LIVE_DISK_IMG) bs=512 seek=2048 conv=notrunc 2>/dev/null; \
+	rm -f fs.img; \
+	rm -rf $$FS_TREE
+	@echo "Pre-baked disk image ready: $(LIVE_DISK_IMG)"
+
 # Limine-based ISO
 ISODIR ?= /tmp/codeos-iso
 LIMINE_DIR ?= .
 
-codeos-1.0.iso: $(TARGET)
+codeos-1.0.iso: $(TARGET) $(LIVE_DISK_IMG)
 	rm -rf $(ISODIR)
 	cp -r bootloader/iso_root $(ISODIR)
 	cp $(TARGET) $(ISODIR)/boot/
@@ -441,27 +475,28 @@ codeos-1.0.iso: $(TARGET)
 	cp bootloader/splash.png $(ISODIR)/boot/
 	cp bootloader/limine-bios-cd.bin $(ISODIR)/
 	cp bootloader/limine-uefi-cd.bin $(ISODIR)/
+	cp $(LIVE_DISK_IMG) $(ISODIR)/disk.img
 	xorriso -as mkisofs -b limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		$(ISODIR) -o $@
 	./bootloader/limine-deploy bios-install $@
-	@echo "Limine ISO: $@"
+	@echo "Limine ISO: $@ (with pre-baked disk.img)"
 
-iso: codeos-1-kernel-grub.iso
+iso: codeos-1.0.iso
 
 # ─── QEMU run targets ───
 QEMU_BASE ?= -machine q35 -m 16G -smp 4 -serial stdio
 QEMU_USB ?= -device usb-ehci,id=ehci -device usb-tablet -device usb-kbd
 
-run: $(TARGET) disk.img
+run: $(TARGET) disk.img-legacy
 	$(QEMU) $(QEMU_BASE) -kernel $(TARGET) $(QEMU_NET) $(QEMU_USB) $(QEMU_FULL_DISK) $(KVM)
 
-run-nographic: $(TARGET) disk.img
+run-nographic: $(TARGET) disk.img-legacy
 	$(QEMU) -machine q35 -m 512M -nographic -kernel $(TARGET) $(QEMU_NET) $(QEMU_USB) $(KVM)
 
-run-disk: $(TARGET) disk.img
+run-disk: $(TARGET) disk.img-legacy
 	$(QEMU) $(QEMU_BASE) -kernel $(TARGET) $(QEMU_NET) $(QEMU_USB) $(QEMU_FULL_DISK) $(KVM)
 
 run-wifi: $(TARGET)
@@ -489,23 +524,23 @@ arm64-run-display-nogui: $(TARGET)
 		-kernel $(TARGET) -serial file:/tmp/zircon-serial.log \
 		-qmp unix:/tmp/zircon-qmp.sock,server,nowait
 
-run-iso: codeos-1.0.iso
-	$(QEMU) $(QEMU_BASE) -boot order=d -cdrom $< $(QEMU_NET) $(QEMU_USB) $(QEMU_DISK) $(KVM)
+run-iso: codeos-1.0.iso $(LIVE_DISK_IMG)
+	$(QEMU) $(QEMU_BASE) -boot order=d -cdrom $< $(QEMU_NET) $(QEMU_USB) -drive file=$(LIVE_DISK_IMG),format=raw,if=ide $(KVM)
 
 run-vbox: codeos-1.0.iso
 	@echo "Running CodeOS in VirtualBox (provisions the 'CodeOS' VM, NAT net, IDE rootfs)..."
 	@$(CURDIR)/../vbox.sh --headless
 
-run-iso-grub: codeos-1-kernel-grub.iso
-	$(QEMU) $(QEMU_BASE) -cdrom $< $(QEMU_NET) $(QEMU_USB) $(QEMU_DISK) $(KVM)
+run-iso-grub: codeos-1-kernel-grub.iso $(LIVE_DISK_IMG)
+	$(QEMU) $(QEMU_BASE) -cdrom $< $(QEMU_NET) $(QEMU_USB) -drive file=$(LIVE_DISK_IMG),format=raw,if=ide $(KVM)
 
-run-iso-nographic: codeos-1.0.iso
-	$(QEMU) -machine q35 -m 512M -nographic -cdrom $< $(QEMU_NET) $(QEMU_DISK) $(KVM)
+run-iso-nographic: codeos-1.0.iso $(LIVE_DISK_IMG)
+	$(QEMU) -machine q35 -m 512M -nographic -cdrom $< $(QEMU_NET) -drive file=$(LIVE_DISK_IMG),format=raw,if=ide $(KVM)
 
 # ─── QEMU with ALL devices (AHCI, full hardware) ───
-QEMU_FULL_DISK ?= -drive file=disk.img,format=raw,if=ide
+# (QEMU_FULL_DISK is defined with the other QEMU defaults, above.)
 
-run-full: $(TARGET) disk.img
+run-full: $(TARGET) disk.img-legacy
 	$(QEMU) -machine q35 -m 512M -serial stdio \
 		-kernel $(TARGET) \
 		$(QEMU_NET) \
@@ -513,42 +548,48 @@ run-full: $(TARGET) disk.img
 		$(QEMU_USB) \
 		$(KVM)
 
-run-iso-full: codeos-1.0.iso
+run-iso-full: codeos-1.0.iso $(LIVE_DISK_IMG)
 	$(QEMU) -machine q35 -m 512M -serial stdio \
 		-cdrom codeos-1.0.iso \
 		$(QEMU_NET) \
-		$(QEMU_FULL_DISK) \
+		-drive file=$(LIVE_DISK_IMG),format=raw,if=ide \
 		$(QEMU_USB) \
 		$(KVM)
 
 # ─── QEMU with virtio-gpu (no VGA) ───
-run-gpu: $(TARGET) disk.img
+run-gpu: $(TARGET) disk.img-legacy
 	$(QEMU) -machine q35 -m 4G -smp 4 -serial stdio \
 		-device virtio-gpu-pci -vga none \
 		-kernel $(TARGET) \
 		$(QEMU_NET) $(QEMU_USB) $(QEMU_FULL_DISK) $(KVM)
 
-# ─── Disk image creation ───
-DISK_IMG ?= disk.img
-DISK_SIZE_M ?= 64
+# ─── Disk image creation (legacy manual targets, use LIVE_DISK_IMG for pre-baked) ───
+# These write $(LEGACY_DISK_IMG), NOT $(LIVE_DISK_IMG). They used to write
+# $(DISK_IMG) = disk.img, which is the pre-baked image's name -- so building any
+# legacy target (disk-img-format, disk-img-populate, disk-img-all) or any
+# run/run-disk/run-full/run-gpu/run-sb target, all of which depend on
+# disk.img-legacy, overwrote the populated pre-baked image with an empty one.
+LEGACY_DISK_IMG = disk.img-legacy
+LEGACY_DISK_SIZE_M ?= 64
 
-disk.img:
-	@echo "Creating disk image ($(DISK_SIZE_M) MB)..."
-	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=$(DISK_SIZE_M) 2>/dev/null
-	parted -s $(DISK_IMG) mklabel msdos 2>/dev/null
-	parted -s $(DISK_IMG) mkpart primary ext2 2048s 100% 2>/dev/null
-	mkfs.ext2 -F -q -E offset=$$((2048 * 512)) $(DISK_IMG) 2>/dev/null
-	@echo "Disk image ready ($(DISK_SIZE_M) MB, ext2 on partition 1)"
+# Legacy empty disk.img-legacy (empty, for manual population)
+disk.img-legacy:
+	@echo "Creating empty disk image ($(LEGACY_DISK_SIZE_M) MB)..."
+	dd if=/dev/zero of=$(LEGACY_DISK_IMG) bs=1M count=$(LEGACY_DISK_SIZE_M) 2>/dev/null
+	parted -s $(LEGACY_DISK_IMG) mklabel msdos 2>/dev/null
+	parted -s $(LEGACY_DISK_IMG) mkpart primary ext2 2048s 100% 2>/dev/null
+	mkfs.ext2 -F -q -E offset=$$((2048 * 512)) $(LEGACY_DISK_IMG) 2>/dev/null
+	@echo "Disk image ready ($(LEGACY_DISK_SIZE_M) MB, ext2 on partition 1)"
 
-disk-img-format: disk.img
+disk-img-format: disk.img-legacy
 	@echo "Reformatting ext2 partition..."
-	mkfs.ext2 -F -q -E offset=$$((2048 * 512)) $(DISK_IMG) 2>/dev/null
+	mkfs.ext2 -F -q -E offset=$$((2048 * 512)) $(LEGACY_DISK_IMG) 2>/dev/null
 	@echo "Done."
 
-disk-img-populate: disk.img
+disk-img-populate: disk.img-legacy
 	@echo "Populating disk image with content..."
-	-sudo losetup -P -f $(DISK_IMG) 2>/dev/null
-	$(eval LOOP := $(shell sudo losetup -j $(CURDIR)/$(DISK_IMG) | cut -d: -f1))
+	-sudo losetup -P -f $(LEGACY_DISK_IMG) 2>/dev/null
+	$(eval LOOP := $(shell sudo losetup -j $(CURDIR)/$(LEGACY_DISK_IMG) | cut -d: -f1))
 	sudo mount $${LOOP}p1 /mnt 2>/dev/null
 	sudo bash -c 'mkdir -p /mnt/scripts /mnt/etc /mnt/bin /mnt/home /mnt/lib'
 	sudo cp /tmp/test_hello /mnt/bin/test_hello
@@ -562,7 +603,7 @@ disk-img-populate: disk.img
 	sudo losetup -d $${LOOP} 2>/dev/null
 	@echo "Disk image populated."
 
-disk-img-all: disk.img disk-img-format disk-img-populate
+disk-img-all: disk.img-legacy disk-img-format disk-img-populate
 
 # ─── Installer: persistent disk install (not live-ISO). See scripts/install-codesos.sh ───
 INSTALL_IMG ?= $(CURDIR)/../codeos-installed.img
@@ -684,7 +725,7 @@ $(OVMF_SB_VARS): $(SB_KEY)
 OVMF_CODE = /usr/share/edk2-ovmf/x64/OVMF_CODE.secboot.4m.fd
 OVMF_VARS = /usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd
 
-run-sb: codeos-1-kernel-signed.iso disk.img
+run-sb: codeos-1-kernel-signed.iso disk.img-legacy
 	cp $(OVMF_VARS) /tmp/sb-vars.fd
 	$(QEMU) -machine q35 -m 512M -serial stdio \
 		-bios $(OVMF_CODE) \
@@ -692,7 +733,7 @@ run-sb: codeos-1-kernel-signed.iso disk.img
 		-cdrom codeos-1-kernel-signed.iso \
 		$(QEMU_NET) $(QEMU_USB) $(QEMU_FULL_DISK) $(KVM)
 
-run-sb-setup: codeos-1-kernel-signed.iso disk.img
+run-sb-setup: codeos-1-kernel-signed.iso disk.img-legacy
 	cp /usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd /tmp/sb-vars.fd
 	$(QEMU) -machine q35 -m 512M -serial stdio \
 		-bios $(OVMF_CODE) \
