@@ -29,7 +29,12 @@
 #include "string.h"
 #include "stdlib.h"
 
+/* Overridable so the host test harness (pkgs/core/ncvm/tests) can point the
+ * wire protocol at a scratch directory.  Same reason jengine.c takes its
+ * limits from a header: one implementation, two consumers. */
+#ifndef CMD_DIR
 #define CMD_DIR        "/tmp/crosvm-cmds"
+#endif
 #define DEFAULT_VMM    "/usr/bin/ncvm-x86_64"
 #define MAX_CMD_LEN    4096
 #define MAX_ARGS       128
@@ -526,7 +531,9 @@ static int cli_vm(int argc, char **argv) {
          * VMM with the QoS args below). Extra args on the CLI are appended:
          *   ncvm start foo -- --kernel /mnt/kernel.bin */
         char path[128];
-        char cmd[MAX_CMD_LEN];
+        /* +2: body can be MAX_CMD_LEN-1 bytes and the newline still has to
+         * fit, otherwise snprintf truncates it away. */
+        char cmd[MAX_CMD_LEN + 2];
         char body[MAX_CMD_LEN];
         int off = 0;
         int i;

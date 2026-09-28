@@ -28,6 +28,7 @@ check:
 	@printf "$(CYAN)$(BOLD)==> Checking build environment...$(RESET)\n"
 	$(MAKE) -C kernel check
 	$(MAKE) jengine-check
+	$(MAKE) ncvm-check
 
 jengine-check:
 	@printf "$(CYAN)$(BOLD)==> Checking Jengine...$(RESET)\n"
@@ -35,6 +36,22 @@ jengine-check:
 		-o /tmp/codeos-jengine-test
 	@/tmp/codeos-jengine-test
 	@printf "$(GREEN)Jengine checks passed$(RESET)\n"
+
+# pkgs/core/ncvm/src/ncvm.c reaches the kernel through inline `int $0x80`
+# stubs, so the only way to test it on the host is to shadow unistd.h with
+# tests/codeos_shim.h and compile the real source against POSIX. CMD_DIR is
+# overridden to a scratch dir so the wire protocol can be exercised without
+# touching /tmp/crosvm-cmds. See AGENTS.md for what the shim does and does
+# not model.
+ncvm-check:
+	@printf "$(CYAN)$(BOLD)==> Checking ncvm backend...$(RESET)\n"
+	@cc -std=c11 -Wall -Wextra -Werror \
+		-Ipkgs/core/ncvm/tests \
+		-DCMD_DIR='"/tmp/ncvm-hosttest-cmds"' \
+		pkgs/core/ncvm/tests/ncvm_test.c \
+		-o /tmp/codeos-ncvm-test
+	@/tmp/codeos-ncvm-test
+	@printf "$(GREEN)ncvm checks passed$(RESET)\n"
 
 # ── Kernel ────────────────────────────────────────────────────────
 kernel:
