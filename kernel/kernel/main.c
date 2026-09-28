@@ -414,6 +414,11 @@ void kernel_main(uint32_t magic __attribute__((unused)),
                 g_https_boot_test = 1;
                 kprintf("boot: HTTPS BOOT TEST requested via cmdline\n");
             }
+            if (strstr(cl, "no-demos")) {
+                extern void prs_set_demos_disabled(int);
+                prs_set_demos_disabled(1);
+                kprintf("boot: no-demos -- self-test windows suppressed\n");
+            }
             /* zircon.init=/path → boot straight into a Zircon ELF instead
              * of the Qt6 desktop (zircon_init/zircond in /sbin/). */
             {

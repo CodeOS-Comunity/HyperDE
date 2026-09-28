@@ -375,6 +375,11 @@ def main():
     ap.add_argument("--settle", type=float, default=3.0)
     ap.add_argument("--mem", default="4G")
     ap.add_argument("--out", default="/tmp/codeos-chrome.png")
+    ap.add_argument("--no-demos", action="store_true",
+                    help="boot limine entry 4 ('CodeOS (No Demos)'), which "
+                         "suppresses the three self-test windows. They are "
+                         "tiled to fill the screen and cover the traffic "
+                         "lights, which is what made the Qt family skip.")
     args = ap.parse_args()
     serial = args.serial or args.out.replace(".png", "-serial.log")
 
@@ -405,7 +410,42 @@ def boot_and_check(args):
         os.unlink(serial)
     proc, q = shot.launch(shot.qemu_argv(mem=args.mem, serial=serial))
     try:
-        time.sleep(args.at)
+        if args.no_demos:
+            # Menu-timed, so confirm from the serial log that the entry we
+            # asked for is the one that actually ran. If the keys landed
+            # before the menu was up, limine silently boots default_entry and
+            # the demos come back -- and a chrome check that then measures
+            # demo windows while claiming to have booted without them is
+            # exactly the silent-wrong-reason failure this script exists to
+            # avoid. So this is a hard failure, not a warning.
+            time.sleep(2.5)
+            for _ in range(3):          # entry 4 is the 4th, so 3x Down
+                q.key("down")
+                time.sleep(0.2)
+            time.sleep(0.4)
+            q.key("ret")
+            time.sleep(max(0.0, args.at - 3.5))
+            if not os.path.exists(serial) or not os.path.getsize(serial):
+                print("FAIL --no-demos: no serial log to confirm the boot "
+                      "entry")
+                return 1
+            with open(serial, errors="replace") as f:
+                boot = f.read()
+            if "no-demos -- self-test windows suppressed" not in boot:
+                print("FAIL --no-demos: the no-demos entry did not run. The "
+                      "menu keys most likely landed before limine's menu was "
+                      "up, so default_entry booted instead. Retry, or raise "
+                      "--boot-entry-at.")
+                return 1
+            demos = [t for t in ("HyperDE", "DevStore", "OpenWeb")
+                     if f"'{t}'" in boot]
+            if demos:
+                print(f"FAIL --no-demos: demo window(s) {demos} still "
+                      f"present despite the flag being set")
+                return 1
+            print("boot entry confirmed: no-demos, 0 demo windows")
+        else:
+            time.sleep(args.at)
         for spec in args.click:
             x, _, y = spec.partition(",")
             q.click(x, y)

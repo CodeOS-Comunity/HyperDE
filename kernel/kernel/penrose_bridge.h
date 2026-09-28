@@ -100,4 +100,17 @@ void prs_emit_motion(int mx, int my, uint16_t state);
 uint32_t prs_demo_window(const char *title);
 void prs_demo_spawn(void);
 
+/* `no-demos` on the kernel command line suppresses the three self-test
+ * windows (HyperDE, DevStore, OpenWeb) that penrose_init() spawns at desktop
+ * startup. Set from main.c's cmdline parser, read from the Rust side via
+ * penrose_init() in rust_penrose/src/codeos.rs.
+ *
+ * The flag exists because the demos are tiled to fill the screen, so they
+ * occlude the traffic lights of any real window underneath them and make the
+ * pixel-level chrome check unreproducible. `prs_demo_spawn()` above is the
+ * C-side leftover and is not the live path -- the Rust penrose_init() calls
+ * prs_demo_window() directly with its own title list. */
+int prs_demos_disabled(void);
+void prs_set_demos_disabled(int disabled);
+
 #endif

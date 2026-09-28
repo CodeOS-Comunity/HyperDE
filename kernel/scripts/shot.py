@@ -264,6 +264,15 @@ def main():
     ap.add_argument("--out", default="/tmp/codeos-shot.png")
     ap.add_argument("--serial", default=LOG)
     ap.add_argument("--mem", default="4G")
+    ap.add_argument("--boot-entry", type=int, default=0, metavar="N",
+                    help="pick limine boot entry N (1-based) instead of "
+                         "letting default_entry auto-boot. 0 = current "
+                         "behaviour. Entry 4 is 'CodeOS (No Demos)', which "
+                         "suppresses the three self-test windows.")
+    ap.add_argument("--boot-entry-at", type=float, default=2.5,
+                    help="seconds after launch to send the menu keys; the "
+                         "limine menu is up for `timeout:` seconds (5 in "
+                         "limine.conf) so this must land inside that window")
     args = ap.parse_args()
 
     if not os.path.exists(ISO):
@@ -275,6 +284,25 @@ def main():
 
     proc, q = launch(qemu_argv(mem=args.mem, serial=args.serial))
     try:
+        if args.boot_entry >= 2:
+            # Navigate the limine menu rather than patching default_entry in
+            # limine.conf and rebuilding the ISO -- this keeps the artifact
+            # under test identical to the one users get, which is the whole
+            # point of a reproducible check.
+            #
+            # This is menu-timed, not deterministic: the keys have to land
+            # while the menu is up (`timeout:` in limine.conf, 5s). If they
+            # land early they are dropped by the BIOS and the default entry
+            # boots instead, silently. So callers must confirm from the serial
+            # log that the entry they asked for is the one that ran --
+            # chrome_check.py does exactly that.
+            time.sleep(args.boot_entry_at)
+            for _ in range(args.boot_entry - 1):
+                q.key("down")
+                time.sleep(0.2)
+            time.sleep(0.4)
+            q.key("ret")
+
         time.sleep(args.at)
         for spec in args.click:
             x, _, y = spec.partition(",")
