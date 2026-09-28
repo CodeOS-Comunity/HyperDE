@@ -30,6 +30,16 @@ make -C kernel run-iso
 ```
 Host needs `x86_64-elf-gcc`, `xorriso`, `python3`, `cargo`, and QEMU for run targets.
 
+## Jengine (`src/jengine.c`) — one source, two consumers, freestanding wins
+- `jengine.c` is compiled into **both** the host test (`make jengine-check`, real libc) and the kernel (`SRC_C += ../src/jengine.c`, `x86_64-elf-gcc -ffreestanding -nostdlib -nodefaultlibs`). The kernel toolchain has **no libc headers at all** — `#include <stdlib.h>` is a fatal error, not a warning. So this file may not use `malloc`/`calloc`/`free`, `strdup`, `strcmp`/`strlen`, or `isalpha`/`isdigit`; it defines its own. The stricter of the two consumers sets the rule, and the host build cannot be allowed to drift into using libc.
+- Verify **both**, not just the host. The kernel-side check is
+  `x86_64-elf-gcc -ffreestanding -nostdlib -nodefaultlibs -Wall -Wextra -Werror -Iinclude -c src/jengine.c`.
+  Afterwards `nm -u` the object: the only permitted undefined symbol is `memcpy`, which the kernel provides in `kernel/kernel/string.c` (linked as `kernel/string.o`). Anything else means a libc call crept in.
+- The interpreter is fixed-size by necessity, not by preference: static scope/function tables and fixed name slots, with recursion capped at `JENGINE_MAX_DEPTH`. That is *why* values are `int64_t` only — there is no allocator, so `jengine_value.str_val` stays unused for API compatibility rather than being filled.
+- `jengine_eval()` **resets interpreter state on entry**, so every evaluation is independent. This is deliberate: `jengine_init()` is called once at panel init and the calculator then evaluates every keystroke against the same engine, so leaking `let x = 5` into the next query would be a bug, not a feature.
+- **jengine is currently dead code inside the kernel image.** `jengine.o` is on the link line and links cleanly, but nothing in the kernel references `jengine_eval` — the callers (`pkgs/core/panels/src/panels.cpp`, `pkgs/core/panels/src/calc.c`, `kernel/kernel/codeos_litehtml.cpp`) are *not* among the linked objects, so `--gc-sections` discards the whole thing. `x86_64-elf-nm codeos-1-kernel.bin | grep -c jengine` returns 0. Its only live consumer is the host test binary. A change here is therefore build-verified but **not** runtime-verified inside the OS; do not claim the OS runs scripts until one of those callers is actually built in.
+
+
 ## Todo
 1. Moss-style CCP fetch/sync — stone.index metadata, `fetch fetch`, `sync -u` (in progress)
 2. Improve kernel quality (memory, sched, syscalls, drivers)
