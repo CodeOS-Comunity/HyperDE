@@ -63,6 +63,14 @@ else
     info "Using existing ISO: $ISO"
 fi
 
+# Run the ncvm host test harness before booting. This gates: `set -e` above
+# means a failing check aborts the run rather than booting on top of a broken
+# backend. Do not add `|| true` here -- the ncvm in-guest backend is exercised
+# for real at boot (ncvm_probe runs `ncvm --selftest`), so a green boot with a
+# red host check would be exactly the failure this is here to catch.
+step "Running ncvm host checks..."
+make ncvm-check
+
 # Build QEMU command
 if ! command -v qemu-system-x86_64 &>/dev/null; then
     error "qemu-system-x86_64 not found in PATH"
